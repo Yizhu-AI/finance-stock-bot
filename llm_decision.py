@@ -3,6 +3,15 @@ The 'agentic' layer: instead of a fixed rule combining technical + sentiment
 signals, this hands the raw evidence to Gemini and asks it to reason about
 what's actually notable and why, and how confident that read is.
 
+Two things make this genuinely agentic rather than a single scripted call:
+  1. Tool use (agent_tools.py) — the model can autonomously decide to pull
+     more price history or more headlines mid-reasoning if it judges the
+     initial evidence too thin, rather than always working from a fixed
+     pre-fetched bundle.
+  2. A critic pass (critic.py) — the draft this function produces is not
+     shipped directly; it's independently reviewed against explicit safety
+     constraints before main.py ever sees it.
+
 This does NOT ask the model for a buy/sell recommendation — it asks for
 analysis and a confidence-in-the-signal rating, which is a materially
 different (and more honest) task than "tell me what to trade."
@@ -14,6 +23,8 @@ from google.genai import types
 from google.genai import errors as genai_errors
 
 import config
+import agent_tools
+import critic
 
 _client = genai.Client(api_key=config.GEMINI_API_KEY) if config.GEMINI_API_KEY else None
 
@@ -23,19 +34,32 @@ _RETRYABLE_STATUS_CODES = {429, 500, 503}
 _MAX_RETRIES = 3
 _BASE_BACKOFF_SECONDS = 2
 
+# Bounds how many autonomous tool calls the model can make per ticker per
+# synthesis — an agent that can call tools needs an explicit ceiling, or a
+# single ambiguous ticker could spiral into unbounded cost/latency.
+_MAX_TOOL_CALLS = 3
+
 _SYSTEM_PROMPT = """You are a financial signal analyst. You are given raw technical \
 and news signals for a stock ticker, computed by a rules-based pipeline. Your job is \
 to synthesize them into a short, plain-English read of what's going on and why it \
 might matter to someone watching this stock.
 
+You have two tools available: get_extended_price_history and get_extended_headlines. \
+Use them ONLY when the initial evidence is genuinely too thin or ambiguous to reach a \
+confident read — for example, a single weak signal with no headlines, or headlines that \
+seem to lack context. Do not call a tool if the initial evidence is already sufficient \
+to answer well; calling tools has a real cost and unnecessary calls should be avoided.
+
 Rules you must follow:
 - You are NOT a financial advisor. Never tell the reader to buy, sell, or hold.
-- Never invent facts, numbers, or news not present in the input you're given.
-- If the signals are weak, contradictory, or thin, say so plainly rather than \
-manufacturing a confident narrative.
+- Never invent facts, numbers, or news not present in the input you're given or returned \
+by a tool call.
+- If the signals are weak, contradictory, or thin — even after using a tool — say so \
+plainly rather than manufacturing a confident narrative.
 - Be concise: 2-4 sentences.
 
-Respond with ONLY a JSON object, no other text, in this exact shape:
+Once you are done (whether or not you used any tools), respond with ONLY a JSON object, \
+no other text, no markdown code fences, in this exact shape:
 {"summary": "<2-4 sentence plain-English synthesis>", "confidence": "<low|medium|high>", "watch_worthy": <true|false>}
 
 "confidence" reflects how much the raw signals agree with each other and how \
@@ -44,12 +68,23 @@ strong they are individually — not how strongly you'd act on them.
 interesting today than an average day, based solely on the given signals."""
 
 
+def _parse_json_response(text: str) -> dict:
+    text = text.strip()
+    # The model is instructed to avoid fences, but strip them defensively
+    # in case it adds them anyway.
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        text = text.removeprefix("json").strip()
+    return json.loads(text)
+
+
 def synthesize(ticker: str, signals: list, headlines: list):
     """
     signals: list of (name, direction, explanation) tuples from analysis.py
     headlines: list of {"headline": str, "source": str}
-    Returns a dict {"summary": str, "confidence": str, "watch_worthy": bool} or None
-    if the LLM layer isn't configured / the call fails (pipeline still works without it).
+    Returns a dict {"summary": str, "confidence": str, "watch_worthy": bool,
+    "critic_approved": bool, "tool_calls": list} or None if the LLM layer
+    isn't configured / the call fails (pipeline still works without it).
     """
     if _client is None:
         return None
@@ -67,6 +102,10 @@ Computed signals:
 Recent headlines:
 {headline_lines}"""
 
+    tool_call_log = []  # populated by agent_tools if the model chooses to call them
+    tools = agent_tools.make_tools(tool_call_log)
+
+    draft = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             response = _client.models.generate_content(
@@ -74,13 +113,15 @@ Recent headlines:
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=_SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    max_output_tokens=300,
+                    tools=tools,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        maximum_remote_calls=_MAX_TOOL_CALLS,
+                    ),
+                    max_output_tokens=600,
                 ),
             )
-            # response_mime_type="application/json" makes Gemini return valid JSON
-            # directly in response.text — no markdown-fence stripping needed.
-            return json.loads(response.text)
+            draft = _parse_json_response(response.text)
+            break
         except genai_errors.APIError as e:
             status_code = getattr(e, "code", None)
             if status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES:
@@ -91,7 +132,15 @@ Recent headlines:
             print(f"[{ticker}] LLM synthesis failed: {e}")
             return None
         except Exception as e:
-            # Non-API errors (bad JSON from the model, network issues, etc.)
-            # aren't worth retrying — fail this ticker's synthesis and move on.
             print(f"[{ticker}] LLM synthesis failed: {e}")
             return None
+
+    if draft is None:
+        return None
+
+    if tool_call_log:
+        print(f"[{ticker}] Agent used {len(tool_call_log)} tool call(s): {tool_call_log}")
+
+    final = critic.review(ticker, signals, headlines, draft)
+    final["tool_calls"] = tool_call_log
+    return final

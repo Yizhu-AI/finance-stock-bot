@@ -67,6 +67,10 @@ def format_digest(results: dict) -> str:
         if llm:
             conf = llm.get("confidence", "unknown")
             lines.append(f"  🤖 [{conf} confidence] {llm.get('summary', '')}")
+            if llm.get("tool_calls"):
+                lines.append(f"  🔧 Agent pulled extra data: {len(llm['tool_calls'])} tool call(s)")
+            if llm.get("critic_approved") is False:
+                lines.append("  ⚠️ Flagged by safety review — see note above")
 
     lines.append("\n_Not financial advice — signals only, do your own research._")
     return "\n".join(lines)
