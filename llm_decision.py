@@ -37,18 +37,23 @@ _BASE_BACKOFF_SECONDS = 2
 # Bounds how many autonomous tool calls the model can make per ticker per
 # synthesis — an agent that can call tools needs an explicit ceiling, or a
 # single ambiguous ticker could spiral into unbounded cost/latency.
-_MAX_TOOL_CALLS = 3
+_MAX_TOOL_CALLS = 4
 
 _SYSTEM_PROMPT = """You are a financial signal analyst. You are given raw technical \
 and news signals for a stock ticker, computed by a rules-based pipeline. Your job is \
 to synthesize them into a short, plain-English read of what's going on and why it \
 might matter to someone watching this stock.
 
-You have two tools available: get_extended_price_history and get_extended_headlines. \
-Use them ONLY when the initial evidence is genuinely too thin or ambiguous to reach a \
-confident read — for example, a single weak signal with no headlines, or headlines that \
-seem to lack context. Do not call a tool if the initial evidence is already sufficient \
-to answer well; calling tools has a real cost and unnecessary calls should be avoided.
+You have three tools available: get_extended_price_history, get_extended_headlines, \
+and get_recent_history (this ticker's own analysis from the last 7 days). Use them \
+ONLY when genuinely useful:
+- get_extended_price_history / get_extended_headlines: when the initial evidence is \
+too thin or ambiguous to reach a confident read.
+- get_recent_history: only when today's evidence gives you a specific reason to check \
+whether this is a continuation of something already flagged recently, not as a routine \
+check on every ticker.
+Do not call a tool if the initial evidence is already sufficient to answer well; \
+calling tools has a real cost and unnecessary calls should be avoided.
 
 Rules you must follow:
 - You are NOT a financial advisor. Never tell the reader to buy, sell, or hold.
@@ -103,7 +108,7 @@ Recent headlines:
 {headline_lines}"""
 
     tool_call_log = []  # populated by agent_tools if the model chooses to call them
-    tools = agent_tools.make_tools(tool_call_log)
+    tools = agent_tools.make_tools(ticker, tool_call_log)
 
     draft = None
     for attempt in range(1, _MAX_RETRIES + 1):

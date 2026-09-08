@@ -3,6 +3,7 @@ Turns raw price data + sentiment data into a set of discrete "signals" —
 each signal is a (name, direction, explanation) tuple so the digest can
 show *why* a ticker was flagged, not just that it was.
 """
+import numpy as np
 import pandas as pd
 import config
 
@@ -13,8 +14,18 @@ def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-9)
-    return 100 - (100 / (1 + rs))
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    # avg_loss == 0 makes the division above NaN — resolve it explicitly:
+    # gains with zero losses is a genuine RSI of 100 (fully overbought), but
+    # zero gains AND zero losses means the price hasn't moved at all, which
+    # is neutral (RSI 50), not oversold. The original naive
+    # "avg_loss.replace(0, tiny_epsilon)" approach collapsed both cases to
+    # RSI≈0, incorrectly flagging a flat, unmoving price as oversold.
+    no_loss_mask = avg_loss == 0
+    rsi = rsi.where(~no_loss_mask, np.where(avg_gain > 0, 100.0, 50.0))
+    return rsi
 
 
 def technical_signals(df: pd.DataFrame):

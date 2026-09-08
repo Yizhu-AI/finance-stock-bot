@@ -55,10 +55,10 @@ def _rule_based_check(summary: str) -> bool:
     return not any(phrase in lowered for phrase in _BANNED_PHRASES)
 
 
-def _llm_check(ticker: str, signals: list, headlines: list, draft: dict) -> bool:
-    """Returns True if the LLM critic approves the draft. Fails closed (False) on any error."""
+def _llm_check(ticker: str, signals: list, headlines: list, draft: dict) -> tuple:
+    """Returns (approved: bool, reason: str). Fails closed (False) on any error."""
     if _client is None:
-        return True  # no critic configured — rule-based check is the only gate
+        return True, "no critic configured — rule-based check is the only gate"
 
     signal_lines = "\n".join(f"- {name} ({direction}): {explanation}" for name, direction, explanation in signals) or "None"
     headline_lines = "\n".join(f"- {h['headline']}" for h in headlines[:5]) or "None"
@@ -87,10 +87,9 @@ Stated confidence: {draft.get('confidence', 'unknown')}"""
             ),
         )
         result = json.loads(response.text)
-        return bool(result.get("approved", False))
+        return bool(result.get("approved", False)), result.get("reason", "no reason given")
     except Exception as e:
-        print(f"[{ticker}] Critic check failed to run: {e} — failing closed")
-        return False
+        return False, f"critic check failed to run: {e}"
 
 
 def review(ticker: str, signals: list, headlines: list, draft: dict) -> dict:
@@ -103,16 +102,21 @@ def review(ticker: str, signals: list, headlines: list, draft: dict) -> dict:
         return draft
 
     passed_rules = _rule_based_check(draft["summary"])
-    passed_llm = _llm_check(ticker, signals, headlines, draft) if passed_rules else False
+    if not passed_rules:
+        passed_llm, reason = False, "rejected by rule-based banned-phrase scan"
+    else:
+        passed_llm, reason = _llm_check(ticker, signals, headlines, draft)
 
     if passed_rules and passed_llm:
         draft["critic_approved"] = True
+        draft["critic_reason"] = reason
         return draft
 
-    print(f"[{ticker}] Critic rejected draft summary (rules={passed_rules}, llm={passed_llm}) — using fallback")
+    print(f"[{ticker}] Critic rejected draft summary — {reason}")
     return {
         "summary": _FALLBACK_SUMMARY,
         "confidence": "low",
         "watch_worthy": draft.get("watch_worthy", False),
         "critic_approved": False,
+        "critic_reason": reason,
     }

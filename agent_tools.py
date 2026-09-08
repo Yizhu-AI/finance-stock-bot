@@ -9,18 +9,26 @@ autonomous rather than a fixed bundle of pre-fetched context: the model
 chooses to pull more evidence only when it judges the initial signals or
 headlines too thin to reach a confident read.
 
-Each tool wraps a data_fetch.py call to avoid duplicating fetch logic, and
-reports its own usage into a shared call-log list so the caller can see
-what the agent actually chose to do (used in main.py's digest formatting).
+Each tool wraps a data source (data_fetch.py for live evidence, memory.py
+for the agent's own past judgments) to avoid duplicating logic, and reports
+its own usage into a shared call-log list so the caller can see what the
+agent actually chose to do (used in main.py's digest formatting).
 """
 import data_fetch
+import memory
 
 
-def make_tools(call_log: list):
+def make_tools(ticker: str, call_log: list):
     """
-    Returns a fresh pair of tool functions bound to this ticker's call_log,
+    Returns a fresh set of tool functions bound to this ticker's call_log,
     so concurrent/successive syntheses for different tickers don't share
     invocation history with each other.
+
+    ticker is bound here (rather than left as a model-supplied argument like
+    the other tools) specifically for get_recent_history — the model has no
+    legitimate reason to query another ticker's history mid-analysis of this
+    one, so binding it removes that possibility entirely rather than relying
+    on the model to behave.
     """
 
     def get_extended_price_history(ticker: str) -> dict:
@@ -69,4 +77,23 @@ def make_tools(call_log: list):
         except Exception as e:
             return {"error": f"Could not fetch extended headlines: {e}"}
 
-    return [get_extended_price_history, get_extended_headlines]
+    def get_recent_history() -> dict:
+        """Look up this same ticker's own analysis history from the last 7
+        days — what it was flagged for previously, if anything, and how
+        confident that past read was. Use this to check whether today's
+        signals are a continuation of something already noted recently (in
+        which case say so explicitly rather than re-presenting it as brand
+        new) or genuinely a fresh development. Do not call this unless
+        today's evidence gives you a specific reason to check for
+        continuity — most tickers most days don't need this.
+        """
+        call_log.append(f"get_recent_history({ticker})")
+        try:
+            history = memory.get_recent_history(ticker, days=7)
+            if not history:
+                return {"history": [], "note": "No prior analysis found in the last 7 days."}
+            return {"history": history}
+        except Exception as e:
+            return {"error": f"Could not fetch recent history: {e}"}
+
+    return [get_extended_price_history, get_extended_headlines, get_recent_history]
