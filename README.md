@@ -187,6 +187,33 @@ following, rather than taking the digest's word for it.
   running portfolio summary (total equity, return %, realized P&L, open
   positions) at the bottom.
 
+## Backtesting (`backtest.py`)
+
+Validates the mechanical SMA-crossover signal from `analysis.py` (the same
+`SMA_SHORT`/`SMA_LONG` thresholds tuned in `config.py`) against historical
+price data, using [backtrader](https://www.backtrader.com/), and compares it
+to a naive buy-and-hold baseline over the same window.
+
+**Scope, deliberately:** this backtests the deterministic technical-signal
+layer only — it does not replay the LLM + critic suggestion layer itself.
+Doing that would mean an actual Gemini call per historical trading day per
+ticker (cost, rate limits — see "About the LLM decision layer" above for how
+fast that adds up even for one live run), and the model has no point-in-time
+headline archive to reason over as news looked on a past date anyway. Treat
+this as a sanity baseline for the signals the LLM's suggestion is built on,
+not a full backtest of the live bot end-to-end.
+
+Sizing mirrors `simulator.py`: starting capital splits evenly across the
+tickers tested, each trading within its own fixed allocation, all-in/all-out.
+
+```bash
+python backtest.py                          # all of WATCHLIST, 2-year window
+python backtest.py --tickers AAPL,TSLA --period 5y --cash 20000
+```
+
+Reports, per ticker and combined: strategy return, buy-and-hold return,
+Sharpe ratio, max drawdown, trade count, and win rate.
+
 ## Persistent memory (`memory.py`)
 
 Every run saves each ticker's result (signal count, LLM summary, confidence,
@@ -248,10 +275,11 @@ review pass, persistent memory across runs, and a buy/sell/hold suggestion
 that drives a paper-trading simulation with a full trade record. Natural
 next steps from here:
 
-- **Benchmark the simulation** — compare the agent's paper-trading equity
-  curve against a naive buy-and-hold baseline on the same watchlist, so
-  "did the suggestions help" has an actual answer instead of just a raw
-  P&L number.
+- **Benchmark the live paper-trading portfolio itself** — `backtest.py`
+  benchmarks the mechanical technical signals against buy-and-hold, but the
+  live `simulator.py` portfolio (driven by the LLM's suggestions) still
+  isn't compared against that same baseline; wiring that comparison into
+  the digest would make "did the suggestions help" have an actual answer.
 - **Position sizing beyond equal-split** — e.g. size by confidence level,
   or allow partial buys/sells instead of all-in/all-out per ticker.
 
