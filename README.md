@@ -159,6 +159,17 @@ the digest with a ⚠️ flag.
   if you hit a 404 "model no longer available" error, check
   https://ai.google.dev/gemini-api/docs/models for the current model ID and
   update `LLM_MODEL` (or the default here) accordingly.
+- **Rate limits on larger watchlists:** Gemini's free tier caps out at 15
+  requests/min. Each ticker can use several requests — synthesis, up to
+  `_MAX_TOOL_CALLS` (4) tool round-trips, a critic check — so a 10+ ticker
+  watchlist processed back-to-back can exceed that limit within a single
+  run, causing some tickers to silently lose their synthesis or critic
+  check. Two mitigations: `main.py` pauses `LLM_REQUEST_DELAY_SECONDS`
+  (`.env`, default 8s) between tickers to spread requests out, and both the
+  synthesis call (`llm_decision.py`) and the critic's LLM call (`critic.py`)
+  retry transient 429/500/503 errors with exponential backoff before giving
+  up. If you're still hitting limits on a large watchlist, raise the delay
+  or move to a paid Gemini tier.
 
 ## Paper-trading simulation (`simulator.py`)
 
@@ -210,12 +221,24 @@ not a full backtest of the live bot end-to-end.
 
 Sizing mirrors `simulator.py` in spirit: starting capital splits evenly
 across the tickers tested, each trading within its own fixed allocation,
-all-in/all-out. The two engines don't size identically though — backtrader
-buys whole shares, vectorbt sizes fractionally by default — so expect their
-numbers to be close but not exactly equal; that's a real sizing-convention
-difference, not a bug in either engine. Trade count and win rate matching
-exactly between engines (as they do in practice) is the actual sanity check;
-small differences in return % and Sharpe are expected.
+all-in/all-out. Two real, expected mechanical differences between the
+engines mean their numbers won't match exactly — neither is a bug:
+
+1. **Fill timing.** backtrader fills an order at the *next* bar's open
+   (deliberately, to avoid lookahead bias); vectorbt, as configured here,
+   fills at the *same* bar's close. A signal that lands right before a
+   large overnight gap, or on the very last bar of the data window, can
+   therefore execute in one engine and not the other — this is the main
+   source of *differing trade counts* between the two. backtrader sizes
+   each order with a small cash buffer to absorb ordinary-sized gaps, and
+   logs (`[TICKER] backtrader: N order(s) rejected...`) any order a gap
+   still made too expensive to fill, rather than dropping it silently.
+2. **Share sizing.** backtrader buys whole shares; vectorbt sizes
+   fractionally by default. This is the source of differing returns/Sharpe
+   *when trade counts already match*.
+
+`--engine both`'s comparison table flags a differing trade count inline so
+you can tell which kind of difference you're looking at.
 
 ```bash
 python backtest.py                          # backtrader only, all of WATCHLIST, 2-year window

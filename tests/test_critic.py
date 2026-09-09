@@ -5,9 +5,19 @@ configuration), so these run without needing a live API key.
 """
 import sys
 import os
+import json
+from unittest.mock import MagicMock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from google.genai import errors as genai_errors
+
 import critic
+
+
+def _fake_response(approved: bool, reason: str):
+    resp = MagicMock()
+    resp.text = json.dumps({"approved": approved, "reason": reason})
+    return resp
 
 
 def setup_function(_):
@@ -80,3 +90,48 @@ def test_llm_check_defaults_to_approved_when_unconfigured():
     approved, reason = critic._llm_check("AAPL", [], [], {"summary": "test", "confidence": "low"})
     assert approved is True
     assert "no critic configured" in reason
+
+
+def test_llm_check_retries_on_transient_error_then_succeeds(monkeypatch):
+    monkeypatch.setattr(critic.time, "sleep", lambda *_: None)
+    critic._client = MagicMock()
+    critic._client.models.generate_content.side_effect = [
+        genai_errors.APIError(429, {"error": {"message": "rate limited"}}),
+        _fake_response(True, "grounded and plausible"),
+    ]
+
+    draft = {"summary": "test", "confidence": "low", "suggestion": "hold"}
+    approved, reason = critic._llm_check("AAPL", [], [], draft)
+
+    assert approved is True
+    assert reason == "grounded and plausible"
+    assert critic._client.models.generate_content.call_count == 2
+
+
+def test_llm_check_fails_closed_after_exhausting_retries(monkeypatch):
+    monkeypatch.setattr(critic.time, "sleep", lambda *_: None)
+    critic._client = MagicMock()
+    critic._client.models.generate_content.side_effect = genai_errors.APIError(
+        429, {"error": {"message": "rate limited"}}
+    )
+
+    draft = {"summary": "test", "confidence": "low", "suggestion": "hold"}
+    approved, reason = critic._llm_check("AAPL", [], [], draft)
+
+    assert approved is False
+    assert "critic check failed to run" in reason
+    assert critic._client.models.generate_content.call_count == critic._MAX_RETRIES
+
+
+def test_llm_check_fails_closed_immediately_on_non_retryable_error(monkeypatch):
+    monkeypatch.setattr(critic.time, "sleep", lambda *_: None)
+    critic._client = MagicMock()
+    critic._client.models.generate_content.side_effect = genai_errors.APIError(
+        400, {"error": {"message": "bad request"}}
+    )
+
+    draft = {"summary": "test", "confidence": "low", "suggestion": "hold"}
+    approved, reason = critic._llm_check("AAPL", [], [], draft)
+
+    assert approved is False
+    assert critic._client.models.generate_content.call_count == 1

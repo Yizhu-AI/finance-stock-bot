@@ -7,6 +7,7 @@ Pipeline: for each ticker in WATCHLIST ->
   paper-trading simulation (simulator.py) -> build digest -> send to Telegram
 """
 import datetime as dt
+import time
 import traceback
 
 import config
@@ -119,7 +120,13 @@ def main():
     allocation = config.SIM_STARTING_CAPITAL / len(config.WATCHLIST) if config.WATCHLIST else 0
     run_date = dt.date.today().isoformat()
 
-    for ticker in config.WATCHLIST:
+    for i, ticker in enumerate(config.WATCHLIST):
+        if i > 0 and config.GEMINI_API_KEY:
+            # Pace requests so a multi-ticker watchlist doesn't blow through
+            # Gemini's free-tier rate limit within a single run (see
+            # LLM_REQUEST_DELAY_SECONDS in config.py).
+            time.sleep(config.LLM_REQUEST_DELAY_SECONDS)
+
         print(f"Processing {ticker}...")
         try:
             results[ticker] = build_ticker_report(ticker)

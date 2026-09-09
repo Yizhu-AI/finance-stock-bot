@@ -23,12 +23,21 @@ as flagged, since a failed safety check on autonomous, unreviewed output
 should fail closed, not attempt a repair that might itself be wrong.
 """
 import json
+import time
 from google import genai
 from google.genai import types
+from google.genai import errors as genai_errors
 
 import config
 
 _client = genai.Client(api_key=config.GEMINI_API_KEY) if config.GEMINI_API_KEY else None
+
+# Same retryable-status/backoff policy as llm_decision.py's synthesis call —
+# without this, a transient 429/500/503 here fails the draft closed even
+# though the analysis itself was fine, wasting the synthesis call already made.
+_RETRYABLE_STATUS_CODES = {429, 500, 503}
+_MAX_RETRIES = 3
+_BASE_BACKOFF_SECONDS = 2
 
 _BANNED_PHRASES = [
     "you should buy", "you should sell", "buy now", "sell now", "strong buy",
@@ -87,20 +96,31 @@ Analyst's summary to review:
 Stated confidence: {draft.get('confidence', 'unknown')}
 Stated suggestion: {draft.get('suggestion', 'unknown')}"""
 
-    try:
-        response = _client.models.generate_content(
-            model=config.LLM_MODEL,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_CRITIC_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                max_output_tokens=150,
-            ),
-        )
-        result = json.loads(response.text)
-        return bool(result.get("approved", False)), result.get("reason", "no reason given")
-    except Exception as e:
-        return False, f"critic check failed to run: {e}"
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            response = _client.models.generate_content(
+                model=config.LLM_MODEL,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=_CRITIC_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    max_output_tokens=150,
+                ),
+            )
+            result = json.loads(response.text)
+            return bool(result.get("approved", False)), result.get("reason", "no reason given")
+        except genai_errors.APIError as e:
+            status_code = getattr(e, "code", None)
+            if status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES:
+                wait = _BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                print(f"[{ticker}] Critic Gemini {status_code} (attempt {attempt}/{_MAX_RETRIES}) — retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            return False, f"critic check failed to run: {e}"
+        except Exception as e:
+            return False, f"critic check failed to run: {e}"
+
+    return False, "critic check failed to run: exhausted retries"
 
 
 def review(ticker: str, signals: list, headlines: list, draft: dict) -> dict:

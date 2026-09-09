@@ -30,4 +30,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           WATCHLIST: ${{ secrets.WATCHLIST }}
           SIM_STARTING_CAPITAL: ${{ secrets.SIM_STARTING_CAPITAL }}
+          LLM_REQUEST_DELAY_SECONDS: ${{ secrets.LLM_REQUEST_DELAY_SECONDS }}
         run: python main.py

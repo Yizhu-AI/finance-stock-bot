@@ -29,6 +29,14 @@ SENTIMENT_BEARISH_THRESHOLD = 0.4  # below this = notably bearish
 # Minimum number of triggered signals before a ticker is included in the digest
 MIN_SIGNALS_TO_ALERT = 1
 
+# Delay between tickers in main.py's loop when the LLM layer is configured,
+# to stay under Gemini's free-tier rate limit (15 requests/min). Each ticker
+# can use several requests (synthesis, up to _MAX_TOOL_CALLS tool round-trips,
+# a critic check) — with no pacing, a 10+ ticker watchlist can blow past that
+# limit within a single run even before considering retries. Not applied if
+# GEMINI_API_KEY isn't set (no LLM calls happen, nothing to pace).
+LLM_REQUEST_DELAY_SECONDS = float(os.getenv("LLM_REQUEST_DELAY_SECONDS") or "8")
+
 # --- Paper-trading simulation ---
 # Total simulated capital, split evenly across the watchlist at run time
 # (SIM_STARTING_CAPITAL / len(WATCHLIST) per ticker). No real money moves —

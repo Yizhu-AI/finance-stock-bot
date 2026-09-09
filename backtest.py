@@ -44,15 +44,27 @@ class SmaCrossoverStrategy(bt.Strategy):
         sma_short = bt.indicators.SMA(period=self.p.sma_short)
         sma_long = bt.indicators.SMA(period=self.p.sma_long)
         self.crossover = bt.indicators.CrossOver(sma_short, sma_long)
+        self.rejected_orders = 0
 
     def next(self):
         if not self.position:
             if self.crossover > 0:
-                size = int(self.broker.getcash() / self.data.close[0])
+                # Orders fill at the NEXT bar's open (backtrader's default,
+                # to avoid lookahead bias), not today's close used to size
+                # this one — an overnight gap up can otherwise make the
+                # order cost more than available cash, so it gets silently
+                # rejected (Margin) and the trade is dropped. A small cash
+                # buffer absorbs normal-sized gaps; notify_order below still
+                # counts anything that slips past it so it's never silent.
+                size = int(self.broker.getcash() * 0.99 / self.data.close[0])
                 if size > 0:
                     self.buy(size=size)
         elif self.crossover < 0:
             self.close()
+
+    def notify_order(self, order):
+        if order.status in (order.Margin, order.Rejected):
+            self.rejected_orders += 1
 
 
 def _buy_and_hold_return_pct(df) -> float:
@@ -101,6 +113,10 @@ def run_backtest_backtrader(ticker: str, period: str, cash: float) -> dict:
     total_trades = trade_stats.get("total", {}).get("closed", 0)
     won_trades = trade_stats.get("won", {}).get("total", 0)
     win_rate_pct = (won_trades / total_trades * 100) if total_trades else None
+
+    if strat.rejected_orders:
+        print(f"[{ticker}] backtrader: {strat.rejected_orders} order(s) rejected "
+              f"(margin/cash shortfall on next-bar-open fill) — trade(s) dropped")
 
     return {
         "ticker": ticker,
@@ -194,15 +210,22 @@ def _print_comparison(bt_results: list, vbt_results: list):
         vbt_r = vbt_by_ticker.get(bt_r["ticker"])
         if vbt_r is None:
             continue
+        trade_note = "" if bt_r["total_trades"] == vbt_r["total_trades"] else \
+            f"  (trades: {bt_r['total_trades']} vs {vbt_r['total_trades']})"
         diff = bt_r["total_return_pct"] - vbt_r["total_return_pct"]
         print(
             f"{bt_r['ticker']:<8}"
             f"{_fmt_pct(bt_r['total_return_pct']):>14}"
             f"{_fmt_pct(vbt_r['total_return_pct']):>14}"
-            f"{diff:>+11.1f}p"
+            f"{diff:>+11.1f}p{trade_note}"
         )
-    print("\nNote: small differences are expected — backtrader sizes whole shares,")
-    print("vectorbt sizes fractionally; both otherwise trade the identical signal.")
+    print("\nNote: differences come from two real, expected mechanics, not a bug in")
+    print("either engine — (1) fill timing: backtrader fills at the NEXT bar's open")
+    print("(no lookahead), vectorbt at the SAME bar's close, so a signal near a big")
+    print("overnight gap or the last bar of data can execute in one engine and not")
+    print("the other; (2) sizing: backtrader buys whole shares, vectorbt fractional.")
+    print("A ticker with a differing trade count above is (1); same trade count but")
+    print("differing return is (2). backtrader logs any order it had to drop.")
 
 
 def main():
