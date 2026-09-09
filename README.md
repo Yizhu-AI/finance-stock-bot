@@ -191,8 +191,13 @@ following, rather than taking the digest's word for it.
 
 Validates the mechanical SMA-crossover signal from `analysis.py` (the same
 `SMA_SHORT`/`SMA_LONG` thresholds tuned in `config.py`) against historical
-price data, using [backtrader](https://www.backtrader.com/), and compares it
-to a naive buy-and-hold baseline over the same window.
+price data, and compares it to a naive buy-and-hold baseline over the same
+window. Two independent open-source backtesting engines are supported —
+[backtrader](https://www.backtrader.com/) (event-driven, one bar at a time)
+and [vectorbt](https://github.com/polakowo/vectorbt) (vectorized) — so
+results can be cross-checked against each other instead of trusted from a
+single implementation. `--engine both` runs the identical signal through
+both and prints a diff table.
 
 **Scope, deliberately:** this backtests the deterministic technical-signal
 layer only — it does not replay the LLM + critic suggestion layer itself.
@@ -203,16 +208,36 @@ headline archive to reason over as news looked on a past date anyway. Treat
 this as a sanity baseline for the signals the LLM's suggestion is built on,
 not a full backtest of the live bot end-to-end.
 
-Sizing mirrors `simulator.py`: starting capital splits evenly across the
-tickers tested, each trading within its own fixed allocation, all-in/all-out.
+Sizing mirrors `simulator.py` in spirit: starting capital splits evenly
+across the tickers tested, each trading within its own fixed allocation,
+all-in/all-out. The two engines don't size identically though — backtrader
+buys whole shares, vectorbt sizes fractionally by default — so expect their
+numbers to be close but not exactly equal; that's a real sizing-convention
+difference, not a bug in either engine. Trade count and win rate matching
+exactly between engines (as they do in practice) is the actual sanity check;
+small differences in return % and Sharpe are expected.
 
 ```bash
-python backtest.py                          # all of WATCHLIST, 2-year window
+python backtest.py                          # backtrader only, all of WATCHLIST, 2-year window
+python backtest.py --engine vectorbt
+python backtest.py --engine both             # both engines + a comparison table
 python backtest.py --tickers AAPL,TSLA --period 5y --cash 20000
 ```
 
 Reports, per ticker and combined: strategy return, buy-and-hold return,
 Sharpe ratio, max drawdown, trade count, and win rate.
+
+**Installing vectorbt:** it pulls in `numba` (JIT compilation) and `plotly`,
+which come with two known installability snags — `plotly>=6` renames a
+trace type vectorbt's own theme-init code still references, breaking
+`import vectorbt` outright (pinned `<6` in `requirements.txt`), and pip's
+default resolver can pick a `numba`/`llvmlite` pairing with no prebuilt
+wheel for your platform, forcing a slow/fragile source build (pinned to
+known-good wheel versions). If a fresh install still tries to build from
+source, use `pip install --only-binary=:all: -r requirements.txt`. Also
+note it will downgrade `pandas` if you're on a very new major version it
+doesn't yet support — everything in this repo is compatible with the
+pandas version vectorbt settles on.
 
 ## Persistent memory (`memory.py`)
 

@@ -4,3 +4,15 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 google-genai>=1.0.0
 backtrader>=1.9.78.123
+vectorbt>=1.0.0
+# vectorbt pulls in numba (JIT) + plotly. Two known installability snags,
+# pinned defensively here rather than left to the resolver:
+#  - plotly>=6 renames a trace type vectorbt's theme-init code still
+#    references, breaking `import vectorbt` outright. Must stay <6.
+#  - pip's default resolver can pick a numba/llvmlite pairing with no
+#    prebuilt wheel for your platform, forcing a slow/fragile source build.
+#    These versions are confirmed to have wheels; if pip still tries to
+#    build from source, install with `pip install --only-binary=:all: -r requirements.txt`.
+plotly<6
+numba==0.62.1
+llvmlite==0.45.1

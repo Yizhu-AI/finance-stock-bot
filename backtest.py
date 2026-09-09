@@ -1,7 +1,9 @@
 """
 Backtests the mechanical SMA-crossover signal from analysis.py (the same
 SMA_SHORT/SMA_LONG thresholds tuned in config.py) against historical price
-data, using backtrader.
+data, using backtrader and/or vectorbt — two independent backtesting
+engines, so results can be cross-checked against each other rather than
+trusted from a single implementation.
 
 Scope, deliberately: this validates the deterministic technical-signal
 layer the LLM's buy/sell/hold suggestion is built on top of. It does NOT
@@ -12,12 +14,20 @@ date without a point-in-time headline archive). Treat this as a sanity
 baseline for the technical signals, not a backtest of exactly what the
 live bot does end-to-end. See README's "Benchmarking" section.
 
-Sizing mirrors simulator.py: SIM_STARTING_CAPITAL splits evenly across the
-tickers being tested, each trading within its own fixed allocation,
-all-in/all-out (no partial sizing) — so results are comparable to the live
-paper-trading portfolio's numbers.
+Sizing mirrors simulator.py in spirit (SIM_STARTING_CAPITAL splits evenly
+across the tickers being tested, each trading within its own fixed
+allocation, all-in/all-out — no partial sizing), but the two engines don't
+size identically: backtrader buys whole shares (`int(cash / price)`,
+leaving small leftover cash idle), while vectorbt's default sizing is
+continuous/fractional. Expect the two engines' numbers to be close but not
+identical because of this — a real sizing-convention difference, not a bug
+in either engine.
 
-Run: python backtest.py [--tickers AAPL,TSLA] [--period 2y] [--cash 10000]
+Run:
+  python backtest.py                              # backtrader only (default)
+  python backtest.py --engine vectorbt
+  python backtest.py --engine both                 # side-by-side + a diff table
+  python backtest.py --tickers AAPL,TSLA --period 5y --cash 20000
 """
 import argparse
 
@@ -51,8 +61,26 @@ def _buy_and_hold_return_pct(df) -> float:
     return (last_close - first_close) / first_close * 100
 
 
-def run_backtest(ticker: str, period: str, cash: float) -> dict:
+def _fetch_clean_price_history(ticker: str, period: str):
     df = data_fetch.get_price_history(ticker, period=period)
+    # yfinance occasionally returns a NaN OHLCV row (seen on the very first
+    # bar of a window) — drop it rather than let it silently poison the
+    # buy-and-hold return calc and the indicators' early rolling windows.
+    return df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+
+
+def _sma_crossover_signals(close):
+    """Entry/exit boolean Series matching backtrader's CrossOver semantics
+    (fires True exactly on the bar the crossover happens)."""
+    sma_short = close.rolling(config.SMA_SHORT).mean()
+    sma_long = close.rolling(config.SMA_LONG).mean()
+    entries = (sma_short > sma_long) & (sma_short.shift(1) <= sma_long.shift(1))
+    exits = (sma_short < sma_long) & (sma_short.shift(1) >= sma_long.shift(1))
+    return entries.fillna(False), exits.fillna(False)
+
+
+def run_backtest_backtrader(ticker: str, period: str, cash: float) -> dict:
+    df = _fetch_clean_price_history(ticker, period)
 
     cerebro = bt.Cerebro()
     cerebro.addstrategy(SmaCrossoverStrategy)
@@ -76,6 +104,7 @@ def run_backtest(ticker: str, period: str, cash: float) -> dict:
 
     return {
         "ticker": ticker,
+        "engine": "backtrader",
         "start_value": start_value,
         "end_value": end_value,
         "total_return_pct": (end_value - start_value) / start_value * 100,
@@ -87,6 +116,36 @@ def run_backtest(ticker: str, period: str, cash: float) -> dict:
     }
 
 
+def run_backtest_vectorbt(ticker: str, period: str, cash: float) -> dict:
+    import vectorbt as vbt  # lazy: heavy import (numba JIT), only pay for it if requested
+
+    df = _fetch_clean_price_history(ticker, period)
+    close = df["Close"]
+    entries, exits = _sma_crossover_signals(close)
+
+    pf = vbt.Portfolio.from_signals(close, entries, exits, init_cash=cash, fees=0.0, freq="1D")
+    total_trades = int(pf.trades.count())
+
+    return {
+        "ticker": ticker,
+        "engine": "vectorbt",
+        "start_value": cash,
+        "end_value": pf.final_value(),
+        "total_return_pct": pf.total_return() * 100,
+        "buy_hold_return_pct": _buy_and_hold_return_pct(df),
+        "sharpe": pf.sharpe_ratio(),
+        "max_drawdown_pct": abs(pf.max_drawdown()) * 100,
+        "total_trades": total_trades,
+        "win_rate_pct": (pf.trades.win_rate() * 100) if total_trades else None,
+    }
+
+
+_ENGINES = {
+    "backtrader": run_backtest_backtrader,
+    "vectorbt": run_backtest_vectorbt,
+}
+
+
 def _fmt_pct(value):
     return f"{value:+.1f}%" if value is not None else "n/a"
 
@@ -95,34 +154,17 @@ def _fmt_num(value, decimals=2):
     return f"{value:.{decimals}f}" if value is not None else "n/a"
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tickers", default=",".join(config.WATCHLIST),
-                         help="Comma-separated tickers (default: WATCHLIST from .env)")
-    parser.add_argument("--period", default="2y",
-                         help="yfinance history period, e.g. 1y/2y/5y (default: 2y)")
-    parser.add_argument("--cash", type=float, default=config.SIM_STARTING_CAPITAL,
-                         help="Total starting capital, split evenly across tickers (default: SIM_STARTING_CAPITAL)")
-    args = parser.parse_args()
+_TABLE_HEADER = f"{'Ticker':<8}{'Strategy':>12}{'Buy&Hold':>12}{'Sharpe':>10}{'MaxDD':>10}{'Trades':>8}{'WinRate':>10}"
 
-    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
-    allocation = args.cash / len(tickers)
 
-    results = []
-    for ticker in tickers:
-        print(f"Backtesting {ticker}...")
-        try:
-            results.append(run_backtest(ticker, args.period, allocation))
-        except Exception as e:
-            print(f"[{ticker}] Backtest failed: {e}")
-
+def _print_results_table(label: str, results: list):
     if not results:
-        print("No results.")
+        print(f"\n=== {label}: no results ===")
         return
 
-    header = f"{'Ticker':<8}{'Strategy':>12}{'Buy&Hold':>12}{'Sharpe':>10}{'MaxDD':>10}{'Trades':>8}{'WinRate':>10}"
-    print("\n" + header)
-    print("-" * len(header))
+    print(f"\n=== {label} ===")
+    print(_TABLE_HEADER)
+    print("-" * len(_TABLE_HEADER))
     for r in results:
         print(
             f"{r['ticker']:<8}"
@@ -137,9 +179,65 @@ def main():
     total_start = sum(r["start_value"] for r in results)
     total_end = sum(r["end_value"] for r in results)
     combined_return_pct = (total_end - total_start) / total_start * 100 if total_start else 0.0
-    print("-" * len(header))
-    print(f"Combined strategy return across {len(results)} ticker(s): {combined_return_pct:+.1f}% "
+    print("-" * len(_TABLE_HEADER))
+    print(f"Combined {label} return across {len(results)} ticker(s): {combined_return_pct:+.1f}% "
           f"(${total_start:.2f} -> ${total_end:.2f})")
+
+
+def _print_comparison(bt_results: list, vbt_results: list):
+    vbt_by_ticker = {r["ticker"]: r for r in vbt_results}
+    header = f"{'Ticker':<8}{'Backtrader':>14}{'Vectorbt':>14}{'Diff (pp)':>12}"
+    print("\n=== Comparison: total return % (backtrader vs vectorbt) ===")
+    print(header)
+    print("-" * len(header))
+    for bt_r in bt_results:
+        vbt_r = vbt_by_ticker.get(bt_r["ticker"])
+        if vbt_r is None:
+            continue
+        diff = bt_r["total_return_pct"] - vbt_r["total_return_pct"]
+        print(
+            f"{bt_r['ticker']:<8}"
+            f"{_fmt_pct(bt_r['total_return_pct']):>14}"
+            f"{_fmt_pct(vbt_r['total_return_pct']):>14}"
+            f"{diff:>+11.1f}p"
+        )
+    print("\nNote: small differences are expected — backtrader sizes whole shares,")
+    print("vectorbt sizes fractionally; both otherwise trade the identical signal.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--tickers", default=",".join(config.WATCHLIST),
+                         help="Comma-separated tickers (default: WATCHLIST from .env)")
+    parser.add_argument("--period", default="2y",
+                         help="yfinance history period, e.g. 1y/2y/5y (default: 2y)")
+    parser.add_argument("--cash", type=float, default=config.SIM_STARTING_CAPITAL,
+                         help="Total starting capital, split evenly across tickers (default: SIM_STARTING_CAPITAL)")
+    parser.add_argument("--engine", choices=["backtrader", "vectorbt", "both"], default="backtrader",
+                         help="Which backtesting engine(s) to run (default: backtrader)")
+    args = parser.parse_args()
+
+    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+    allocation = args.cash / len(tickers)
+    engines = ["backtrader", "vectorbt"] if args.engine == "both" else [args.engine]
+
+    results_by_engine = {}
+    for engine in engines:
+        run_fn = _ENGINES[engine]
+        results = []
+        for ticker in tickers:
+            print(f"Backtesting {ticker} ({engine})...")
+            try:
+                results.append(run_fn(ticker, args.period, allocation))
+            except Exception as e:
+                print(f"[{ticker}] {engine} backtest failed: {e}")
+        results_by_engine[engine] = results
+
+    for engine in engines:
+        _print_results_table(engine, results_by_engine[engine])
+
+    if args.engine == "both":
+        _print_comparison(results_by_engine["backtrader"], results_by_engine["vectorbt"])
 
 
 if __name__ == "__main__":
