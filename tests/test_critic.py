@@ -34,10 +34,25 @@ def test_rule_based_check_case_insensitive():
 
 
 def test_review_passes_clean_draft_unchanged():
-    draft = {"summary": "AAPL shows mixed signals with no clear direction.", "confidence": "low", "watch_worthy": False}
+    draft = {"summary": "AAPL shows mixed signals with no clear direction.", "confidence": "low", "watch_worthy": False, "suggestion": "hold"}
     result = critic.review("AAPL", [], [], draft)
     assert result["critic_approved"] is True
     assert result["summary"] == draft["summary"]
+    assert result["suggestion"] == "hold"
+
+
+def test_review_rejects_invalid_suggestion():
+    draft = {"summary": "AAPL shows a clean bullish crossover.", "confidence": "high", "watch_worthy": True, "suggestion": "strong buy"}
+    result = critic.review("AAPL", [], [], draft)
+    assert result["critic_approved"] is False
+    assert result["suggestion"] == "hold"
+
+
+def test_review_rejects_missing_suggestion():
+    draft = {"summary": "AAPL shows a clean bullish crossover.", "confidence": "high", "watch_worthy": True}
+    result = critic.review("AAPL", [], [], draft)
+    assert result["critic_approved"] is False
+    assert result["suggestion"] == "hold"
 
 
 def test_review_replaces_rejected_draft_with_fallback():

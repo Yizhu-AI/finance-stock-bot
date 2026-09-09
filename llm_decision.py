@@ -12,9 +12,13 @@ Two things make this genuinely agentic rather than a single scripted call:
      shipped directly; it's independently reviewed against explicit safety
      constraints before main.py ever sees it.
 
-This does NOT ask the model for a buy/sell recommendation — it asks for
-analysis and a confidence-in-the-signal rating, which is a materially
-different (and more honest) task than "tell me what to trade."
+In addition to its analysis, the model is asked for a structured buy/sell/hold
+`suggestion`, strictly derived from the given evidence. This exists to drive
+`simulator.py`'s paper-trading simulation — a bookkeeping exercise against
+fake money, not investment advice to a human reader. The free-text `summary`
+is still kept analytical (no direct "you should buy" language) so the
+narrative and the mechanical suggestion stay clearly separated; critic.py
+checks both.
 """
 import json
 import time
@@ -56,21 +60,28 @@ Do not call a tool if the initial evidence is already sufficient to answer well;
 calling tools has a real cost and unnecessary calls should be avoided.
 
 Rules you must follow:
-- You are NOT a financial advisor. Never tell the reader to buy, sell, or hold.
 - Never invent facts, numbers, or news not present in the input you're given or returned \
 by a tool call.
 - If the signals are weak, contradictory, or thin — even after using a tool — say so \
 plainly rather than manufacturing a confident narrative.
 - Be concise: 2-4 sentences.
+- In the "summary" field specifically, stay analytical — describe what the evidence shows, \
+don't address the reader directly or use imperative language like "you should buy/sell". \
+The "suggestion" field below is the only place the buy/sell/hold call belongs.
 
 Once you are done (whether or not you used any tools), respond with ONLY a JSON object, \
 no other text, no markdown code fences, in this exact shape:
-{"summary": "<2-4 sentence plain-English synthesis>", "confidence": "<low|medium|high>", "watch_worthy": <true|false>}
+{"summary": "<2-4 sentence plain-English synthesis>", "confidence": "<low|medium|high>", \
+"watch_worthy": <true|false>, "suggestion": "<buy|sell|hold>"}
 
 "confidence" reflects how much the raw signals agree with each other and how \
-strong they are individually — not how strongly you'd act on them.
+strong they are individually.
 "watch_worthy" should be true only if this ticker seems meaningfully more \
-interesting today than an average day, based solely on the given signals."""
+interesting today than an average day, based solely on the given signals.
+"suggestion" is a mechanical call for a paper-trading simulation, strictly derived \
+from the given signals: "buy" if the evidence leans clearly bullish, "sell" if it \
+leans clearly bearish, "hold" if it's weak, mixed, or contradictory. Default to \
+"hold" whenever you're not confident either direction is clearly supported."""
 
 
 def _parse_json_response(text: str) -> dict:
@@ -88,8 +99,9 @@ def synthesize(ticker: str, signals: list, headlines: list):
     signals: list of (name, direction, explanation) tuples from analysis.py
     headlines: list of {"headline": str, "source": str}
     Returns a dict {"summary": str, "confidence": str, "watch_worthy": bool,
-    "critic_approved": bool, "tool_calls": list} or None if the LLM layer
-    isn't configured / the call fails (pipeline still works without it).
+    "suggestion": "buy"|"sell"|"hold", "critic_approved": bool,
+    "tool_calls": list} or None if the LLM layer isn't configured / the call
+    fails (pipeline still works without it).
     """
     if _client is None:
         return None

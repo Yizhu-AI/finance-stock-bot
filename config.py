@@ -28,3 +28,9 @@ SENTIMENT_BEARISH_THRESHOLD = 0.4  # below this = notably bearish
 
 # Minimum number of triggered signals before a ticker is included in the digest
 MIN_SIGNALS_TO_ALERT = 1
+
+# --- Paper-trading simulation ---
+# Total simulated capital, split evenly across the watchlist at run time
+# (SIM_STARTING_CAPITAL / len(WATCHLIST) per ticker). No real money moves —
+# see simulator.py.
+SIM_STARTING_CAPITAL = float(os.getenv("SIM_STARTING_CAPITAL") or "10000")

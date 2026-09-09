@@ -29,4 +29,5 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           WATCHLIST: ${{ secrets.WATCHLIST }}
+          SIM_STARTING_CAPITAL: ${{ secrets.SIM_STARTING_CAPITAL }}
         run: python main.py

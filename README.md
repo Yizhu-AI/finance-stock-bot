@@ -2,9 +2,13 @@
 
 An autonomous pipeline that watches a list of tickers, computes technical +
 news signals, uses an LLM agent (with its own tools and a safety-review
-layer) to reason about what's notable, and sends you a digest over
-Telegram. This is a **research/signal tool**, not investment advice —
-treat its output as one input among many.
+layer) to reason about what's notable — including a buy/sell/hold
+suggestion — and paper-trades that suggestion against simulated capital,
+sending you a digest over Telegram. This is a **research/simulation tool**,
+not real trading and not investment advice — the buy/sell suggestions only
+ever move fake money and exist to let you retroactively judge whether the
+agent's calls would have been worth following; treat its output as one
+input among many.
 
 ## How it works
 
@@ -13,8 +17,9 @@ data_fetch.py     -> pulls price history (yfinance) + news (Finnhub)
 analysis.py       -> turns raw data into discrete signals (SMA crossover, RSI, volume spike, sentiment)
 memory.py         -> persists each run to SQLite, and serves the agent's own history back to it
 agent_tools.py    -> tools the agent can call on its own: more price history, more headlines, its own past runs
-llm_decision.py   -> hands signals+headlines to Gemini, which reasons (optionally using tools) to a judgment
-critic.py         -> independently reviews that judgment before it's allowed to ship
+llm_decision.py   -> hands signals+headlines to Gemini, which reasons (optionally using tools) to a judgment + a buy/sell/hold suggestion
+critic.py         -> independently reviews that judgment (and suggestion) before it's allowed to ship
+simulator.py      -> applies an approved suggestion to a paper-trading portfolio, keeps every simulated trade as a permanent record
 main.py           -> orchestrates all of the above into a digest, saves the run, only surfaces notable tickers
 notifier.py       -> sends the digest to your Telegram (one or more recipients)
 ```
@@ -101,8 +106,13 @@ periods — fine for a personal digest, just don't rely on it for precise timing
 `llm_decision.py` is what makes this an *agentic* pipeline rather than a fixed
 rule engine: instead of only combining signals mechanically, it hands the raw
 technical signals + recent headlines to Gemini and asks it to reason about
-what's actually notable and why, with an honest confidence read (not a
-buy/sell call — the model is explicitly instructed never to give one).
+what's actually notable and why, with an honest confidence read, plus a
+structured `buy`/`sell`/`hold` suggestion strictly derived from that evidence.
+That suggestion drives `simulator.py`'s paper-trading simulation (see below)
+— it is never presented to you as a directive. The free-text `summary` is
+kept deliberately analytical (no "you should buy" language addressed at the
+reader); the mechanical call lives only in the structured `suggestion` field,
+and `critic.py` enforces that separation.
 
 Two things make this genuinely *agentic* rather than a single scripted LLM
 call:
@@ -121,11 +131,16 @@ shows up in the digest as a 🔧 line.
 
 **2. A critic / verification pass (`critic.py`)** — the model's draft output
 is never shipped directly. It passes through an independent second check
-first: a cheap, deterministic scan for banned buy/sell language, plus a
-separate LLM call that verifies the summary is actually grounded in the
-given evidence and that its stated confidence is plausible. If either check
-fails, the draft is replaced with a safe fallback message rather than
-attempting an automatic "fix" — a failed safety check on autonomous,
+first: a cheap, deterministic scan of the free-text `summary` for banned
+imperative buy/sell language ("you should buy", "time to sell", etc — the
+structured `suggestion` field is exempt from this scan, since it's expected
+to say exactly that), plus a separate LLM call that verifies the summary is
+actually grounded in the given evidence, that its stated confidence is
+plausible, and that the `suggestion` is a reasonable read of the evidence
+rather than contradicted by it (e.g. "buy" on uniformly bearish signals).
+If any check fails, the draft is replaced with a safe fallback message and
+the suggestion defaults to `hold` (a safe no-op for the simulator) rather
+than attempting an automatic "fix" — a failed safety check on autonomous,
 unreviewed output should fail closed. A critic-rejected ticker shows up in
 the digest with a ⚠️ flag.
 
@@ -144,6 +159,33 @@ the digest with a ⚠️ flag.
   if you hit a 404 "model no longer available" error, check
   https://ai.google.dev/gemini-api/docs/models for the current model ID and
   update `LLM_MODEL` (or the default here) accordingly.
+
+## Paper-trading simulation (`simulator.py`)
+
+Every ticker's critic-approved `suggestion` is applied to a simulated
+portfolio — no real money moves, ever. This exists so you can look back
+later and judge whether the agent's calls would actually have been worth
+following, rather than taking the digest's word for it.
+
+- **Sizing:** `SIM_STARTING_CAPITAL` (`.env`, defaults to $10,000) is split
+  evenly across `WATCHLIST` at run time — each ticker trades only within its
+  own fixed allocation. There's no shared cash pool across tickers, and no
+  rebalancing if you change the watchlist size later.
+- **Entry:** a `buy` suggestion opens a position only if that ticker isn't
+  already held — it uses the ticker's entire available allocation (no
+  partial sizing).
+- **Exit:** a position only closes on an explicit `sell` suggestion from a
+  later run — there's no stop-loss or take-profit. This matches the rest of
+  the pipeline's signal-driven (not price-driven) design.
+- **Records:** every simulated trade (buy or sell, with price, share count,
+  dollar amount, and realized P&L on sells) is appended to a `trades` table
+  in `signal_history.db` — nothing is ever overwritten or deleted, so the
+  full history of every simulated call is always available. Portfolio
+  equity and P&L are recomputed fresh from that trade log each run rather
+  than stored separately, so there's a single source of truth.
+- The digest shows each run's suggestion, any trade it triggered, and a
+  running portfolio summary (total equity, return %, realized P&L, open
+  positions) at the bottom.
 
 ## Persistent memory (`memory.py`)
 
@@ -202,7 +244,16 @@ loosen them once you see how noisy your watchlist is.
 ## Roadmap ideas (v3+)
 
 Already built: LLM reasoning layer, autonomous tool use, a critic/safety
-review pass, and persistent memory across runs. Natural next steps from here:
+review pass, persistent memory across runs, and a buy/sell/hold suggestion
+that drives a paper-trading simulation with a full trade record. Natural
+next steps from here:
+
+- **Benchmark the simulation** — compare the agent's paper-trading equity
+  curve against a naive buy-and-hold baseline on the same watchlist, so
+  "did the suggestions help" has an actual answer instead of just a raw
+  P&L number.
+- **Position sizing beyond equal-split** — e.g. size by confidence level,
+  or allow partial buys/sells instead of all-in/all-out per ticker.
 
 - **Global tool-call budget** — right now each ticker independently gets up
   to 4 tool calls; across an 11-ticker watchlist that's a real aggregate
