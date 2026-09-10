@@ -112,6 +112,32 @@ def test_headline_keyword_sentiment_insufficient_headlines():
     assert signals == []  # below min_headlines threshold
 
 
+def test_macd_crossover_bullish_on_recovery():
+    # A 55-day fall followed by exactly one bar of the recovery's start —
+    # the MACD/signal-line crossover lands precisely on this last bar
+    # (verified against pandas-ta's own MACD directly; MACD crossovers,
+    # unlike RSI/SMA levels, only fire on the exact bar they occur).
+    closes = np.concatenate([np.linspace(150, 100, 55), np.linspace(100, 160, 10)])[:56]
+    df = _make_price_df(closes, n=len(closes))
+    signals = analysis.technical_signals(df)
+    names = [s[0] for s in signals]
+    assert "MACD crossover" in names
+    direction = next(s[1] for s in signals if s[0] == "MACD crossover")
+    assert direction == "bullish"
+
+
+def test_bollinger_bands_bearish_on_breakout():
+    # Flat for a long base, then a sharp spike on the last bar — closing
+    # price should land above the upper band computed from the flat base.
+    closes = np.concatenate([[100.0] * 55, [130.0]])
+    df = _make_price_df(closes, n=len(closes))
+    signals = analysis.technical_signals(df)
+    names = [s[0] for s in signals]
+    assert "Bollinger Bands" in names
+    direction = next(s[1] for s in signals if s[0] == "Bollinger Bands")
+    assert direction == "bearish"
+
+
 def test_headline_keyword_sentiment_no_clear_signal():
     headlines = [
         {"headline": "Company holds annual shareholder meeting", "source": "Reuters"},

@@ -3,6 +3,12 @@ pandas>=2.0.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 google-genai>=1.0.0
+# pandas-ta-classic, not pandas-ta: the original pandas-ta project's PyPI
+# releases now require Python>=3.12, and its last Python-3.11-compatible
+# release (0.3.14b0) predates numpy>=2.0 support (it imports the removed
+# numpy.NaN). pandas-ta-classic is the actively maintained fork — same
+# df.ta.* accessor API, supports numpy>=2.0 and Python>=3.10.
+pandas-ta-classic>=0.6.52
 backtrader>=1.9.78.123
 vectorbt>=1.0.0
 # vectorbt pulls in numba (JIT) + plotly. Two known installability snags,

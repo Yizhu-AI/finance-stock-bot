@@ -73,14 +73,6 @@ def _buy_and_hold_return_pct(df) -> float:
     return (last_close - first_close) / first_close * 100
 
 
-def _fetch_clean_price_history(ticker: str, period: str):
-    df = data_fetch.get_price_history(ticker, period=period)
-    # yfinance occasionally returns a NaN OHLCV row (seen on the very first
-    # bar of a window) — drop it rather than let it silently poison the
-    # buy-and-hold return calc and the indicators' early rolling windows.
-    return df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-
-
 def _sma_crossover_signals(close):
     """Entry/exit boolean Series matching backtrader's CrossOver semantics
     (fires True exactly on the bar the crossover happens)."""
@@ -92,7 +84,7 @@ def _sma_crossover_signals(close):
 
 
 def run_backtest_backtrader(ticker: str, period: str, cash: float) -> dict:
-    df = _fetch_clean_price_history(ticker, period)
+    df = data_fetch.get_price_history(ticker, period=period)
 
     cerebro = bt.Cerebro()
     cerebro.addstrategy(SmaCrossoverStrategy)
@@ -135,7 +127,7 @@ def run_backtest_backtrader(ticker: str, period: str, cash: float) -> dict:
 def run_backtest_vectorbt(ticker: str, period: str, cash: float) -> dict:
     import vectorbt as vbt  # lazy: heavy import (numba JIT), only pay for it if requested
 
-    df = _fetch_clean_price_history(ticker, period)
+    df = data_fetch.get_price_history(ticker, period=period)
     close = df["Close"]
     entries, exits = _sma_crossover_signals(close)
 

@@ -26,6 +26,15 @@ NEWS_LOOKBACK_DAYS = 3
 SENTIMENT_BULLISH_THRESHOLD = 0.6  # Finnhub bullishPercent above this = notably bullish
 SENTIMENT_BEARISH_THRESHOLD = 0.4  # below this = notably bearish
 
+# MACD crossover (pandas-ta) — standard 12/26/9 periods
+MACD_FAST = 12
+MACD_SLOW = 26
+MACD_SIGNAL = 9
+
+# Bollinger Bands (pandas-ta) — standard 20-period, 2 std dev
+BB_PERIOD = 20
+BB_STD = 2.0
+
 # Minimum number of triggered signals before a ticker is included in the digest
 MIN_SIGNALS_TO_ALERT = 1
 

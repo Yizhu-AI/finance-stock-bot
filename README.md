@@ -14,7 +14,7 @@ input among many.
 
 ```
 data_fetch.py     -> pulls price history (yfinance) + news (Finnhub)
-analysis.py       -> turns raw data into discrete signals (SMA crossover, RSI, volume spike, sentiment)
+analysis.py       -> turns raw data into discrete signals (SMA crossover, RSI, MACD crossover, Bollinger Bands, volume spike, sentiment)
 memory.py         -> persists each run to SQLite, and serves the agent's own history back to it
 agent_tools.py    -> tools the agent can call on its own: more price history, more headlines, its own past runs
 llm_decision.py   -> hands signals+headlines to Gemini, which reasons (optionally using tools) to a judgment + a buy/sell/hold suggestion
@@ -313,8 +313,23 @@ instead — no code changes needed.
 ## Tuning signals
 
 All thresholds live in `config.py` — e.g. `VOLUME_SPIKE_MULTIPLIER`,
-`RSI_OVERBOUGHT/OVERSOLD`, `SENTIMENT_BULLISH_THRESHOLD`. Start conservative and
-loosen them once you see how noisy your watchlist is.
+`RSI_OVERBOUGHT/OVERSOLD`, `SENTIMENT_BULLISH_THRESHOLD`, `MACD_FAST/SLOW/SIGNAL`,
+`BB_PERIOD/BB_STD`. Start conservative and loosen them once you see how noisy
+your watchlist is.
+
+**MACD crossover and Bollinger Bands** (via
+[pandas-ta-classic](https://github.com/twopirllc/pandas-ta-classic)) are two
+more technical signals alongside SMA crossover, RSI, and volume spike:
+- MACD crossover reacts faster than the SMA crossover (different smoothing —
+  EMA-based, 12/26/9 by default) and can catch trend changes SMA misses.
+- Bollinger Bands flag a close outside its own recent volatility range
+  (20-period, 2 std dev by default) — a relative read, unlike RSI's fixed
+  0-100 scale, so it adapts to how volatile a given ticker normally is.
+
+Not `pandas-ta`: that project's PyPI releases now require Python 3.12+, and
+its last Python-3.11-compatible release predates numpy 2.0 support (it
+imports the since-removed `numpy.NaN`). `pandas-ta-classic` is the actively
+maintained fork with the same `df.ta.*` accessor API.
 
 ## Roadmap ideas (v3+)
 

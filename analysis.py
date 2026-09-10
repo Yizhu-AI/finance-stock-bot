@@ -5,6 +5,8 @@ show *why* a ticker was flagged, not just that it was.
 """
 import numpy as np
 import pandas as pd
+import pandas_ta_classic as ta  # noqa: F401 — import registers the df.ta accessor used below
+
 import config
 
 
@@ -37,6 +39,8 @@ def technical_signals(df: pd.DataFrame):
     df["sma_long"] = df["Close"].rolling(config.SMA_LONG).mean()
     df["rsi"] = compute_rsi(df["Close"])
     df["avg_volume_20"] = df["Volume"].rolling(20).mean()
+    df.ta.macd(fast=config.MACD_FAST, slow=config.MACD_SLOW, signal=config.MACD_SIGNAL, append=True)
+    df.ta.bbands(length=config.BB_PERIOD, std=config.BB_STD, append=True)
 
     if len(df) < config.SMA_LONG + 2:
         return signals  # not enough history yet
@@ -60,6 +64,26 @@ def technical_signals(df: pd.DataFrame):
         signals.append(("RSI overbought", "bearish", f"RSI at {latest['rsi']:.0f} (overbought)"))
     elif latest["rsi"] <= config.RSI_OVERSOLD:
         signals.append(("RSI oversold", "bullish", f"RSI at {latest['rsi']:.0f} (oversold)"))
+
+    # MACD crossover — a second, independent trend-following read alongside
+    # the SMA crossover above (different smoothing, reacts faster).
+    macd_col = f"MACD_{config.MACD_FAST}_{config.MACD_SLOW}_{config.MACD_SIGNAL}"
+    macd_signal_col = f"MACDs_{config.MACD_FAST}_{config.MACD_SLOW}_{config.MACD_SIGNAL}"
+    if prev[macd_col] <= prev[macd_signal_col] and latest[macd_col] > latest[macd_signal_col]:
+        signals.append(("MACD crossover", "bullish", "MACD line crossed above its signal line"))
+    elif prev[macd_col] >= prev[macd_signal_col] and latest[macd_col] < latest[macd_signal_col]:
+        signals.append(("MACD crossover", "bearish", "MACD line crossed below its signal line"))
+
+    # Bollinger Bands — a volatility-relative read on how stretched the
+    # close is from its own recent mean, independent of RSI's fixed 0-100 scale.
+    bb_lower_col = f"BBL_{config.BB_PERIOD}_{config.BB_STD}"
+    bb_upper_col = f"BBU_{config.BB_PERIOD}_{config.BB_STD}"
+    if latest["Close"] < latest[bb_lower_col]:
+        signals.append(("Bollinger Bands", "bullish",
+                         f"Close (${latest['Close']:.2f}) is below the lower band (${latest[bb_lower_col]:.2f})"))
+    elif latest["Close"] > latest[bb_upper_col]:
+        signals.append(("Bollinger Bands", "bearish",
+                         f"Close (${latest['Close']:.2f}) is above the upper band (${latest[bb_upper_col]:.2f})"))
 
     return signals
 

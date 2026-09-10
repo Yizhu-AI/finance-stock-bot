@@ -15,7 +15,12 @@ def get_price_history(ticker: str, period: str = "3mo", interval: str = "1d"):
     df = yf.Ticker(ticker).history(period=period, interval=interval)
     if df.empty:
         raise ValueError(f"No price data returned for {ticker}")
-    return df
+    # yfinance can return a NaN OHLC row for the current, still-forming
+    # trading day (volume already present, prices not yet settled). Drop
+    # it here rather than in every caller — every consumer of this
+    # DataFrame (analysis.py's rolling indicators, main.py's latest_price,
+    # backtest.py) otherwise risks silently computing against NaN.
+    return df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
 
 
 def get_news_sentiment(ticker: str):
