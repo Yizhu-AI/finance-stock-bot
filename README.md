@@ -101,13 +101,36 @@ The workflow file is already included at `.github/workflows/daily.yml`. To use i
    - `LLM_REQUEST_DELAY_SECONDS` (pacing between tickers, default 8s)
    - `CRITIC_REQUEST_DELAY_SECONDS` (pacing within a ticker's own requests, default 2s)
 3. That's it — it'll run automatically on the schedule defined in the workflow
-   (default: 9:30 AM Eastern on weekdays). Edit the `cron:` line in the workflow
-   file to change the time — cron schedules are in UTC.
+   (default: hourly, 9am-5pm Eastern/Toronto, weekdays — 9 runs/day). Edit
+   the `cron:` line in the workflow file to change the times — cron
+   schedules are in UTC.
 4. To test it immediately without waiting for the schedule: go to the **Actions**
    tab in your repo → **Daily Stock Signal Digest** → **Run workflow**.
 
 Note: GitHub's cron schedules can run a few minutes late during high-traffic
 periods — fine for a personal digest, just don't rely on it for precise timing.
+
+**Daylight saving time:** GitHub Actions cron is always UTC and doesn't
+auto-adjust for DST, so a schedule written for Eastern time is only exactly
+right for half the year — the workflow file's comment explains which UTC
+hours to use for EDT vs. EST, and you'd shift every hour by 1 twice a year
+to stay exact. If you'd rather not think about it twice a year, a
+DST-proof alternative is to run the job every hour year-round (`cron: '0
+* * * *'`) and have an early step check the actual local time and skip
+the rest of the job outside your target hours:
+```yaml
+- name: Check if within business hours
+  run: |
+    hour=$(TZ='America/Toronto' date +%H)
+    if [ "$hour" -lt 9 ] || [ "$hour" -gt 17 ]; then
+      echo "Outside 9am-5pm Toronto time ($hour:00) — skipping."
+      echo "SKIP=true" >> "$GITHUB_ENV"
+    fi
+```
+then add `if: env.SKIP != 'true'` to the later steps (dependency install,
+run signal bot). This trades a fixed schedule for correctness — the job
+still starts every hour (each skip is nearly instant/free), it just does
+nothing outside your window, automatically right across DST changes.
 
 ## About the LLM decision layer
 

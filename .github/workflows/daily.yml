@@ -2,9 +2,17 @@ name: Daily Stock Signal Digest
 
 on:
   schedule:
-    # 13:30 UTC = 9:30 AM Eastern (market open) on weekdays.
-    # Adjust for your timezone / when you want the digest.
-    - cron: '30 13 * * 1-5'
+    # Hourly, 9am-5pm Eastern (Toronto), weekdays — 9 runs/day: 9,10,11,12,1,2,3,4,5.
+    # GitHub Actions cron is always UTC and does NOT auto-adjust for
+    # daylight saving time, so the UTC hours below are only correct for
+    # one half of the year:
+    #   EDT (UTC-4, roughly mid-March to early November): 13-21 UTC = 9am-5pm ET  <- current
+    #   EST (UTC-5, roughly November to mid-March):        14-22 UTC = 9am-5pm ET
+    # Twice a year, around the US/Canada DST switch, shift every hour in
+    # the cron line below by 1 (or see the README's "Scheduling it"
+    # section for a DST-proof alternative that checks local time at
+    # runtime instead of hardcoding it).
+    - cron: '0 13-21 * * 1-5'
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab, for testing
 
 jobs:
