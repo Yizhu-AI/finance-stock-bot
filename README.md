@@ -190,17 +190,28 @@ following, rather than taking the digest's word for it.
   own fixed allocation. There's no shared cash pool across tickers, and no
   rebalancing if you change the watchlist size later.
 - **Entry:** a `buy` suggestion opens a position only if that ticker isn't
-  already held — it uses the ticker's entire available allocation (no
-  partial sizing).
+  already held — and only deploys a *fraction* of the ticker's available
+  cash, sized by the LLM's stated confidence
+  (`POSITION_SIZE_HIGH/MEDIUM/LOW_CONFIDENCE` in `config.py`, default
+  100%/60%/30%). An unrecognized or missing confidence value falls back to
+  the low fraction. Cash held back isn't stranded — it stays in the
+  ticker's running balance and is available to a later buy once the
+  current position is fully closed.
 - **Exit:** a position only closes on an explicit `sell` suggestion from a
-  later run — there's no stop-loss or take-profit. This matches the rest of
-  the pipeline's signal-driven (not price-driven) design.
+  later run, and always exits the *entire* position regardless of
+  confidence — there's no stop-loss/take-profit and no partial sells.
+  Partial sells were deliberately left out: they'd need tracking multiple
+  cost-basis lots per ticker instead of the current single-lot model, for
+  a murkier signal ("sell, but only somewhat") than confidence-scaled
+  entries. This otherwise matches the rest of the pipeline's signal-driven
+  (not price-driven) design.
 - **Records:** every simulated trade (buy or sell, with price, share count,
-  dollar amount, and realized P&L on sells) is appended to a `trades` table
-  in `signal_history.db` — nothing is ever overwritten or deleted, so the
-  full history of every simulated call is always available. Portfolio
-  equity and P&L are recomputed fresh from that trade log each run rather
-  than stored separately, so there's a single source of truth.
+  dollar amount, confidence, size fraction, and realized P&L on sells) is
+  appended to a `trades` table in `signal_history.db` — nothing is ever
+  overwritten or deleted, so the full history of every simulated call is
+  always available. Portfolio equity and P&L are recomputed fresh from
+  that trade log each run rather than stored separately, so there's a
+  single source of truth.
 - The digest shows each run's suggestion, any trade it triggered, and a
   running portfolio summary (total equity, return %, realized P&L, open
   positions) at the bottom.
@@ -360,8 +371,8 @@ instead — no code changes needed.
 
 All thresholds live in `config.py` — e.g. `VOLUME_SPIKE_MULTIPLIER`,
 `RSI_OVERBOUGHT/OVERSOLD`, `SENTIMENT_BULLISH_THRESHOLD`, `MACD_FAST/SLOW/SIGNAL`,
-`BB_PERIOD/BB_STD`. Start conservative and loosen them once you see how noisy
-your watchlist is.
+`BB_PERIOD/BB_STD`, `POSITION_SIZE_HIGH/MEDIUM/LOW_CONFIDENCE`. Start
+conservative and loosen them once you see how noisy your watchlist is.
 
 **MACD crossover and Bollinger Bands** (via
 [pandas-ta-classic](https://github.com/twopirllc/pandas-ta-classic)) are two
@@ -381,12 +392,9 @@ maintained fork with the same `df.ta.*` accessor API.
 
 Already built: LLM reasoning layer, autonomous tool use, a critic/safety
 review pass, persistent memory across runs, a buy/sell/hold suggestion
-that drives a paper-trading simulation with a full trade record, a
-buy-and-hold benchmark for that live portfolio, and pre-commit secret
-scanning. Natural next steps from here:
-
-- **Position sizing beyond equal-split** — e.g. size by confidence level,
-  or allow partial buys/sells instead of all-in/all-out per ticker.
+that drives a paper-trading simulation with a full trade record,
+confidence-based position sizing, a buy-and-hold benchmark for that live
+portfolio, and pre-commit secret scanning. Natural next steps from here:
 
 - **Global tool-call budget** — right now each ticker independently gets up
   to 4 tool calls; across an 11-ticker watchlist that's a real aggregate

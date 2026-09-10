@@ -51,3 +51,12 @@ LLM_REQUEST_DELAY_SECONDS = float(os.getenv("LLM_REQUEST_DELAY_SECONDS") or "8")
 # (SIM_STARTING_CAPITAL / len(WATCHLIST) per ticker). No real money moves —
 # see simulator.py.
 SIM_STARTING_CAPITAL = float(os.getenv("SIM_STARTING_CAPITAL") or "10000")
+
+# Position sizing by suggestion confidence: fraction of a ticker's
+# available cash to deploy on a "buy" — higher confidence, bigger stake.
+# An unrecognized/missing confidence value falls back to the low-confidence
+# fraction (conservative default). Sells always exit the full position
+# regardless of confidence — see simulator.py's docstring for why.
+POSITION_SIZE_HIGH_CONFIDENCE = 1.0
+POSITION_SIZE_MEDIUM_CONFIDENCE = 0.6
+POSITION_SIZE_LOW_CONFIDENCE = 0.3

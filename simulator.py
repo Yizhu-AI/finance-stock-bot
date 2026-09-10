@@ -8,11 +8,23 @@ retroactively against what they'd actually have earned.
 Sizing: SIM_STARTING_CAPITAL (config.py) is split evenly across the
 watchlist — each ticker gets a fixed allocation and trades only within it.
 There is no shared cash pool across tickers, and no rebalancing if the
-watchlist size changes between runs.
+watchlist size changes between runs. Within a ticker's allocation, a buy
+deploys a fraction of the ticker's *available cash* based on the LLM's
+confidence in the suggestion (POSITION_SIZE_*_CONFIDENCE in config.py) —
+high confidence uses the full available cash, lower confidence holds some
+back. Leftover cash from a partial buy isn't stranded: it's still tracked
+in the ticker's running cash balance and available to a later buy once the
+current position is closed (see get_position's replay logic).
 
 Exit rule: a position only closes on an explicit "sell" suggestion from the
-agent on a later run — no stop-loss/take-profit. This matches the rest of
-the pipeline's signal-driven (not price-driven) design.
+agent on a later run, and always exits the *entire* position — no
+stop-loss/take-profit, and no confidence-scaled partial sells. Partial
+sells were deliberately left out: they'd require tracking multiple
+cost-basis lots per ticker (e.g. FIFO or average cost) instead of the
+current single-lot-per-open-position model, for a less obviously useful
+signal than confidence-scaled entries (a "sell, but only somewhat" call is
+a murkier concept than "buy, but only somewhat"). This otherwise matches
+the rest of the pipeline's signal-driven (not price-driven) design.
 
 State isn't stored directly — like memory.py, everything is derived by
 replaying the `trades` table, so there's a single source of truth (the
@@ -22,6 +34,7 @@ existing GitHub Actions persistence step already covers them.
 """
 import datetime as dt
 
+import config
 import data_fetch
 import memory
 
@@ -44,6 +57,15 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        # Migration for DBs created before confidence-based sizing existed —
+        # CREATE TABLE IF NOT EXISTS above is a no-op against an existing
+        # table, so an already-created trades table needs these added
+        # explicitly rather than picking them up from the schema above.
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()}
+        if "confidence" not in existing_cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN confidence TEXT")
+        if "size_fraction" not in existing_cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN size_fraction REAL")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades (ticker, run_date)")
 
 
@@ -80,30 +102,47 @@ def get_position(ticker: str, allocation: float) -> dict:
 
 
 def record_trade(ticker: str, run_date: str, action: str, price: float, shares: float,
-                  cash_amount: float, realized_pnl: float = None, reason: str = None):
+                  cash_amount: float, realized_pnl: float = None, reason: str = None,
+                  confidence: str = None, size_fraction: float = None):
     if action not in _VALID_ACTIONS:
         raise ValueError(f"invalid trade action: {action!r}")
     init_db()
     with memory._connect() as conn:
         conn.execute(
             """INSERT INTO trades
-               (run_date, ticker, action, price, shares, cash_amount, realized_pnl, reason, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (run_date, ticker, action, price, shares, cash_amount, realized_pnl, reason,
+                confidence, size_fraction, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_date, ticker, action, price, shares, cash_amount, realized_pnl, reason,
-             dt.datetime.now().isoformat()),
+             confidence, size_fraction, dt.datetime.now().isoformat()),
         )
 
 
+def _position_size_fraction(confidence: str) -> float:
+    """Fraction of a ticker's available cash to deploy on a buy, by the
+    LLM's stated confidence. Unrecognized/missing confidence is treated as
+    low — conservative default for an unreadable signal."""
+    return {
+        "high": config.POSITION_SIZE_HIGH_CONFIDENCE,
+        "medium": config.POSITION_SIZE_MEDIUM_CONFIDENCE,
+        "low": config.POSITION_SIZE_LOW_CONFIDENCE,
+    }.get(confidence, config.POSITION_SIZE_LOW_CONFIDENCE)
+
+
 def process_suggestion(ticker: str, suggestion: str, price, allocation: float,
-                        run_date: str = None, reason: str = None):
+                        confidence: str = None, run_date: str = None, reason: str = None):
     """
     Applies a buy/sell/hold suggestion to the simulated portfolio for
     `ticker`. No-ops (returns None) on "hold", on a "buy" with no available
     cash or an already-open position, on a "sell" with no open position, or
     if `price` is missing/invalid. Returns a dict describing the trade
     executed, if any:
-      {"action": "buy", "shares": ..., "cash_amount": ...}
+      {"action": "buy", "shares": ..., "cash_amount": ..., "size_fraction": ...}
       {"action": "sell", "shares": ..., "cash_amount": ..., "realized_pnl": ...}
+
+    A buy deploys `_position_size_fraction(confidence)` of the ticker's
+    available cash, not necessarily all of it — see the module docstring.
+    A sell always exits the entire position, regardless of confidence.
     """
     if price is None or price <= 0:
         return None
@@ -111,10 +150,12 @@ def process_suggestion(ticker: str, suggestion: str, price, allocation: float,
     position = get_position(ticker, allocation)
 
     if suggestion == "buy" and position["shares"] == 0 and position["cash"] > 0:
-        shares = position["cash"] / price
-        cash_amount = position["cash"]
-        record_trade(ticker, run_date, "buy", price, shares, cash_amount, reason=reason)
-        return {"action": "buy", "shares": shares, "cash_amount": cash_amount}
+        fraction = _position_size_fraction(confidence)
+        cash_amount = position["cash"] * fraction
+        shares = cash_amount / price
+        record_trade(ticker, run_date, "buy", price, shares, cash_amount, reason=reason,
+                      confidence=confidence, size_fraction=fraction)
+        return {"action": "buy", "shares": shares, "cash_amount": cash_amount, "size_fraction": fraction}
 
     if suggestion == "sell" and position["shares"] > 0:
         shares = position["shares"]

@@ -62,7 +62,7 @@ def run_simulation(ticker: str, report: dict, allocation: float, run_date: str):
         return None
     return simulator.process_suggestion(
         ticker, llm.get("suggestion", "hold"), price, allocation,
-        run_date=run_date, reason=llm.get("summary"),
+        confidence=llm.get("confidence"), run_date=run_date, reason=llm.get("summary"),
     )
 
 
@@ -98,7 +98,9 @@ def format_digest(results: dict, trades: dict, portfolio: dict, benchmark: dict 
             trade = trades.get(ticker)
             if trade:
                 if trade["action"] == "buy":
-                    lines.append(f"  💰 Simulated BUY: {trade['shares']:.3f} sh @ ${report['latest_price']:.2f} (${trade['cash_amount']:.2f})")
+                    size_pct = trade["size_fraction"] * 100
+                    lines.append(f"  💰 Simulated BUY: {trade['shares']:.3f} sh @ ${report['latest_price']:.2f} "
+                                 f"(${trade['cash_amount']:.2f}, {size_pct:.0f}% of available cash)")
                 else:
                     lines.append(f"  💰 Simulated SELL: {trade['shares']:.3f} sh @ ${report['latest_price']:.2f} — realized P&L: ${trade['realized_pnl']:+.2f}")
 

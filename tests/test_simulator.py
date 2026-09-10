@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 import pytest
+import config
 import memory
 import simulator
 
@@ -32,8 +33,8 @@ def test_get_position_starts_with_full_allocation():
 
 
 def test_buy_opens_position():
-    trade = simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, run_date="2026-09-01")
-    assert trade == {"action": "buy", "shares": 10.0, "cash_amount": ALLOCATION}
+    trade = simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="high", run_date="2026-09-01")
+    assert trade == {"action": "buy", "shares": 10.0, "cash_amount": ALLOCATION, "size_fraction": 1.0}
 
     position = simulator.get_position("AAPL", ALLOCATION)
     assert position["shares"] == 10.0
@@ -42,8 +43,8 @@ def test_buy_opens_position():
 
 
 def test_buy_noop_when_already_holding():
-    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, run_date="2026-09-01")
-    second = simulator.process_suggestion("AAPL", "buy", 120.0, ALLOCATION, run_date="2026-09-02")
+    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="high", run_date="2026-09-01")
+    second = simulator.process_suggestion("AAPL", "buy", 120.0, ALLOCATION, confidence="high", run_date="2026-09-02")
     assert second is None
 
     position = simulator.get_position("AAPL", ALLOCATION)
@@ -51,7 +52,7 @@ def test_buy_noop_when_already_holding():
 
 
 def test_sell_closes_position_with_realized_pnl():
-    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, run_date="2026-09-01")
+    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="high", run_date="2026-09-01")
     trade = simulator.process_suggestion("AAPL", "sell", 110.0, ALLOCATION, run_date="2026-09-05")
 
     assert trade["action"] == "sell"
@@ -71,7 +72,7 @@ def test_sell_noop_when_no_position():
 
 def test_hold_is_always_a_noop():
     assert simulator.process_suggestion("AAPL", "hold", 100.0, ALLOCATION) is None
-    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, run_date="2026-09-01")
+    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="high", run_date="2026-09-01")
     assert simulator.process_suggestion("AAPL", "hold", 105.0, ALLOCATION) is None
 
 
@@ -81,12 +82,60 @@ def test_process_suggestion_skips_on_missing_price():
     assert simulator.get_position("AAPL", ALLOCATION)["shares"] == 0.0
 
 
+def test_buy_sizes_by_confidence():
+    # high -> full allocation
+    trade = simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="high", run_date="2026-09-01")
+    assert trade["size_fraction"] == pytest.approx(1.0)
+    assert trade["cash_amount"] == pytest.approx(ALLOCATION)
+
+    # medium -> 60% of allocation
+    trade = simulator.process_suggestion("TSLA", "buy", 100.0, ALLOCATION, confidence="medium", run_date="2026-09-01")
+    assert trade["size_fraction"] == pytest.approx(0.6)
+    assert trade["cash_amount"] == pytest.approx(600.0)
+
+    # low -> 30% of allocation
+    trade = simulator.process_suggestion("NVDA", "buy", 100.0, ALLOCATION, confidence="low", run_date="2026-09-01")
+    assert trade["size_fraction"] == pytest.approx(0.3)
+    assert trade["cash_amount"] == pytest.approx(300.0)
+
+
+def test_buy_defaults_to_low_confidence_fraction_when_unspecified():
+    trade = simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, run_date="2026-09-01")
+    assert trade["size_fraction"] == pytest.approx(config.POSITION_SIZE_LOW_CONFIDENCE)
+
+    trade2 = simulator.process_suggestion("TSLA", "buy", 100.0, ALLOCATION, confidence="unrecognized", run_date="2026-09-01")
+    assert trade2["size_fraction"] == pytest.approx(config.POSITION_SIZE_LOW_CONFIDENCE)
+
+
+def test_sell_exits_full_position_regardless_of_confidence():
+    # A partial (medium-confidence) buy still gets sold in full.
+    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="medium", run_date="2026-09-01")
+    position_before_sell = simulator.get_position("AAPL", ALLOCATION)
+    assert position_before_sell["shares"] == pytest.approx(6.0)  # 600 / 100
+
+    trade = simulator.process_suggestion("AAPL", "sell", 110.0, ALLOCATION, confidence="low", run_date="2026-09-03")
+    assert trade["shares"] == pytest.approx(6.0)
+
+    position = simulator.get_position("AAPL", ALLOCATION)
+    assert position["shares"] == 0.0
+
+
+def test_leftover_cash_from_partial_buy_survives_a_full_round_trip():
+    # Medium-confidence buy deploys 600 of 1000, leaving 400 idle.
+    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="medium", run_date="2026-09-01")
+    # Sell returns 6 sh * 110 = 660, plus the 400 that was never deployed.
+    simulator.process_suggestion("AAPL", "sell", 110.0, ALLOCATION, run_date="2026-09-03")
+
+    position = simulator.get_position("AAPL", ALLOCATION)
+    assert position["cash"] == pytest.approx(400.0 + 660.0)
+
+
 def test_portfolio_summary_mixes_open_and_closed_positions():
     # AAPL: bought and sold at a profit (realized).
-    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, run_date="2026-09-01")
+    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="high", run_date="2026-09-01")
     simulator.process_suggestion("AAPL", "sell", 110.0, ALLOCATION, run_date="2026-09-03")
     # TSLA: still holding, marked to a current price for unrealized P&L.
-    simulator.process_suggestion("TSLA", "buy", 200.0, ALLOCATION, run_date="2026-09-02")
+    simulator.process_suggestion("TSLA", "buy", 200.0, ALLOCATION, confidence="high", run_date="2026-09-02")
 
     summary = simulator.portfolio_summary(
         ["AAPL", "TSLA"], ALLOCATION, current_prices={"AAPL": 110.0, "TSLA": 220.0},
@@ -101,7 +150,7 @@ def test_portfolio_summary_mixes_open_and_closed_positions():
 
 
 def test_tickers_have_independent_allocations():
-    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, run_date="2026-09-01")
+    simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, confidence="high", run_date="2026-09-01")
     tsla_position = simulator.get_position("TSLA", ALLOCATION)
     assert tsla_position == {"cash": ALLOCATION, "shares": 0.0, "cost_basis": 0.0}
 
