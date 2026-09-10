@@ -95,10 +95,11 @@ The workflow file is already included at `.github/workflows/daily.yml`. To use i
    - `GEMINI_API_KEY`
    - `WATCHLIST` (e.g. `AAPL,TSLA,NVDA`)
 
-   Two more are optional — both have sensible defaults in `config.py`, add
+   Three more are optional — all have sensible defaults in `config.py`, add
    them only if you want to override:
    - `SIM_STARTING_CAPITAL` (paper-trading capital, default $10,000)
    - `LLM_REQUEST_DELAY_SECONDS` (pacing between tickers, default 8s)
+   - `CRITIC_REQUEST_DELAY_SECONDS` (pacing within a ticker's own requests, default 2s)
 3. That's it — it'll run automatically on the schedule defined in the workflow
    (default: 9:30 AM Eastern on weekdays). Edit the `cron:` line in the workflow
    file to change the time — cron schedules are in UTC.
@@ -171,12 +172,21 @@ the digest with a ⚠️ flag.
   `_MAX_TOOL_CALLS` (4) tool round-trips, a critic check — so a 10+ ticker
   watchlist processed back-to-back can exceed that limit within a single
   run, causing some tickers to silently lose their synthesis or critic
-  check. Two mitigations: `main.py` pauses `LLM_REQUEST_DELAY_SECONDS`
-  (`.env`, default 8s) between tickers to spread requests out, and both the
-  synthesis call (`llm_decision.py`) and the critic's LLM call (`critic.py`)
-  retry transient 429/500/503 errors with exponential backoff before giving
-  up. If you're still hitting limits on a large watchlist, raise the delay
-  or move to a paid Gemini tier.
+  check. Three mitigations: `main.py` pauses `LLM_REQUEST_DELAY_SECONDS`
+  (`.env`, default 8s) between tickers; `llm_decision.py` additionally
+  pauses `CRITIC_REQUEST_DELAY_SECONDS` (`.env`, default 2s) between a
+  ticker's own synthesis call and its critic review call, since a single
+  ticker's requests otherwise burst out back-to-back and can peak a
+  rolling 60-second window well above what the inter-ticker pacing alone
+  would suggest (Gemini's own quota dashboard, at aistudio.google.com,
+  reports *peak* RPM in a window — worth checking there if you're unsure
+  whether you're actually near the limit); and both the synthesis call
+  and the critic's LLM call retry transient 429/500/503 errors with
+  exponential backoff before giving up. Neither delay reaches the
+  automatic tool-call round-trips themselves — those happen inside the
+  SDK's own function-calling loop within one API call, with no hook to
+  pace between them. If you're still hitting limits on a large watchlist,
+  raise either delay or move to a paid Gemini tier.
 
 ## Paper-trading simulation (`simulator.py`)
 

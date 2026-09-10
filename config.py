@@ -46,6 +46,19 @@ MIN_SIGNALS_TO_ALERT = 1
 # GEMINI_API_KEY isn't set (no LLM calls happen, nothing to pace).
 LLM_REQUEST_DELAY_SECONDS = float(os.getenv("LLM_REQUEST_DELAY_SECONDS") or "8")
 
+# Delay between a ticker's own synthesis call and its critic review call,
+# inside llm_decision.py. LLM_REQUEST_DELAY_SECONDS above only paces the
+# *start* of each ticker's turn — it doesn't stop a single ticker's own
+# requests (synthesis, then possibly a few automatic tool-call round-trips,
+# then the critic's separate call) from bursting out almost simultaneously.
+# Those bursts, repeated every LLM_REQUEST_DELAY_SECONDS, are enough to peak
+# a rolling 60-second window well above the steady-state pacing would
+# suggest (observed: free-tier limit is 15 RPM, but Google's own dashboard
+# showed a 22 RPM peak). This doesn't reach the automatic tool-call
+# round-trips themselves — those happen inside the SDK's own function-calling
+# loop within one generate_content() call, with no hook to pace between them.
+CRITIC_REQUEST_DELAY_SECONDS = float(os.getenv("CRITIC_REQUEST_DELAY_SECONDS") or "2")
+
 # --- Paper-trading simulation ---
 # Total simulated capital, split evenly across the watchlist at run time
 # (SIM_STARTING_CAPITAL / len(WATCHLIST) per ticker). No real money moves —

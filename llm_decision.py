@@ -158,6 +158,10 @@ Recent headlines:
     if tool_call_log:
         print(f"[{ticker}] Agent used {len(tool_call_log)} tool call(s): {tool_call_log}")
 
+    # Space this ticker's own requests out a bit rather than letting
+    # synthesis + critic review fire back-to-back — see
+    # CRITIC_REQUEST_DELAY_SECONDS in config.py for why.
+    time.sleep(config.CRITIC_REQUEST_DELAY_SECONDS)
     final = critic.review(ticker, signals, headlines, draft)
     final["tool_calls"] = tool_call_log
     return final
