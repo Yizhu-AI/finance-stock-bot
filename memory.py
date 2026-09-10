@@ -58,6 +58,8 @@ def init_db():
             conn.execute("ALTER TABLE runs ADD COLUMN suggestion TEXT")
         if "critic_reason" not in existing_cols:
             conn.execute("ALTER TABLE runs ADD COLUMN critic_reason TEXT")
+        if "regenerated" not in existing_cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN regenerated INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_ticker_date ON runs (ticker, run_date)")
 
 
@@ -71,8 +73,8 @@ def save_run(ticker: str, report: dict, run_date: str = None):
         conn.execute(
             """INSERT INTO runs
                (run_date, ticker, signal_count, summary, confidence, watch_worthy,
-                critic_approved, tool_calls, suggestion, critic_reason, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                critic_approved, tool_calls, suggestion, critic_reason, regenerated, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_date,
                 ticker,
@@ -84,6 +86,7 @@ def save_run(ticker: str, report: dict, run_date: str = None):
                 json.dumps(llm.get("tool_calls", [])) if llm else None,
                 llm.get("suggestion"),
                 llm.get("critic_reason"),
+                int(bool(llm.get("regenerated"))) if llm else None,
                 dt.datetime.now().isoformat(),
             ),
         )
@@ -103,7 +106,8 @@ def get_recent_history(ticker: str, days: int = 7, exclude_today: bool = True) -
     today = dt.date.today().isoformat()
 
     query = ("SELECT run_date, signal_count, summary, confidence, watch_worthy, "
-             "suggestion, critic_approved, critic_reason FROM runs WHERE ticker = ? AND run_date >= ?")
+             "suggestion, critic_approved, critic_reason, regenerated "
+             "FROM runs WHERE ticker = ? AND run_date >= ?")
     params = [ticker, cutoff]
     if exclude_today:
         query += " AND run_date < ?"
@@ -123,6 +127,7 @@ def get_recent_history(ticker: str, days: int = 7, exclude_today: bool = True) -
             "suggestion": r[5],
             "critic_approved": bool(r[6]) if r[6] is not None else None,
             "critic_reason": r[7],
+            "regenerated": bool(r[8]) if r[8] is not None else None,
         }
         for r in rows
     ]

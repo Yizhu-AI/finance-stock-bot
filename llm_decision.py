@@ -26,7 +26,14 @@ call:
   2. A critic pass (critic.py) — the final draft (from the coordinator, or
      directly from a lone specialist) is not shipped directly; it's
      independently reviewed against explicit safety constraints before
-     main.py ever sees it.
+     main.py ever sees it. A rejection isn't necessarily final: the
+     critic's specific reason is fed back to whichever component produced
+     the draft for exactly one revision attempt (_MAX_REGENERATION_ATTEMPTS)
+     before falling back to the generic safe message — a genuine
+     generator/critic loop rather than reject-and-discard. Only that one
+     retry is allowed, not an open-ended loop, for the same reason
+     _MAX_TOOL_CALLS bounds tool use: an ambiguous ticker shouldn't be able
+     to spiral into unbounded cost or latency chasing critic approval.
 
 In addition to its analysis, the pipeline produces a structured buy/sell/hold
 `suggestion`, strictly derived from the given evidence. This exists to drive
@@ -59,6 +66,13 @@ _BASE_BACKOFF_SECONDS = 2
 # ambiguous ticker could spiral into unbounded cost/latency. Technical and
 # news each get their own budget of up to this many.
 _MAX_TOOL_CALLS = 4
+
+# How many times a critic-rejected draft gets fed back for revision before
+# falling back to the generic safe message. One, matching the "generator/
+# critic loop" being a bounded two-pass process, not an open-ended retry
+# until approval — a rejection is a legitimate outcome, not a bug to
+# route around indefinitely.
+_MAX_REGENERATION_ATTEMPTS = 1
 
 _LEAN_TO_SUGGESTION = {"bullish": "buy", "bearish": "sell", "neutral": "hold"}
 
@@ -191,21 +205,34 @@ def _call_gemini(ticker: str, system_prompt: str, user_prompt: str, tools=None, 
     return None
 
 
-def _run_technical_analyst(ticker: str, signals: list, call_log: list) -> dict:
+def _revision_note(critic_reason: str) -> str:
+    """Appended to a regeneration attempt's prompt — shared wording works
+    for both a specialist (revising its read) and the coordinator (revising
+    its reconciled judgment)."""
+    return (f'Your previous answer was rejected by compliance review for this reason: '
+            f'"{critic_reason}"\n\nRevise your answer to address this specific concern, '
+            f'while still following all the rules and the JSON format above.')
+
+
+def _run_technical_analyst(ticker: str, signals: list, call_log: list, revision_note: str = None) -> dict:
     signal_lines = "\n".join(f"- {name} ({direction}): {explanation}" for name, direction, explanation in signals)
     user_prompt = f"Ticker: {ticker}\n\nComputed technical signals:\n{signal_lines}"
+    if revision_note:
+        user_prompt += f"\n\n{revision_note}"
     tools = agent_tools.make_technical_tools(ticker, call_log)
     return _call_gemini(ticker, _TECHNICAL_SYSTEM_PROMPT, user_prompt, tools=tools, max_output_tokens=300)
 
 
-def _run_news_analyst(ticker: str, headlines: list, call_log: list) -> dict:
+def _run_news_analyst(ticker: str, headlines: list, call_log: list, revision_note: str = None) -> dict:
     headline_lines = "\n".join(f"- {h['headline']} ({h['source']})" for h in headlines[:5])
     user_prompt = f"Ticker: {ticker}\n\nRecent headlines:\n{headline_lines}"
+    if revision_note:
+        user_prompt += f"\n\n{revision_note}"
     tools = agent_tools.make_news_tools(ticker, call_log)
     return _call_gemini(ticker, _NEWS_SYSTEM_PROMPT, user_prompt, tools=tools, max_output_tokens=300)
 
 
-def _run_coordinator(ticker: str, technical: dict, news: dict) -> dict:
+def _run_coordinator(ticker: str, technical: dict, news: dict, revision_note: str = None) -> dict:
     user_prompt = f"""Ticker: {ticker}
 
 Technical analyst:
@@ -217,6 +244,8 @@ News analyst:
 - Read: {news.get('read', '')}
 - Lean: {news.get('lean', 'unknown')}
 - Confidence: {news.get('confidence', 'unknown')}"""
+    if revision_note:
+        user_prompt += f"\n\n{revision_note}"
     return _call_gemini(ticker, _COORDINATOR_SYSTEM_PROMPT, user_prompt, max_output_tokens=500)
 
 
@@ -246,9 +275,11 @@ def synthesize(ticker: str, signals: list, headlines: list):
     Returns a dict {"summary": str, "confidence": str, "watch_worthy": bool,
     "suggestion": "buy"|"sell"|"hold", "critic_approved": bool,
     "tool_calls": list, "technical_lean"/"technical_confidence": str|None,
-    "news_lean"/"news_confidence": str|None} or None if the LLM layer isn't
-    configured / no evidence exists / every call that ran failed (pipeline
-    still works without it).
+    "news_lean"/"news_confidence": str|None, "regenerated": bool} or None if
+    the LLM layer isn't configured / no evidence exists / every call that
+    ran failed (pipeline still works without it). "regenerated" is True iff
+    a critic rejection triggered the one-revision generator/critic loop
+    (regardless of whether the revision was ultimately approved).
     """
     if _client is None:
         return None
@@ -268,12 +299,16 @@ def synthesize(ticker: str, signals: list, headlines: list):
     if technical and news:
         time.sleep(config.INTRA_TICKER_REQUEST_DELAY_SECONDS)
         draft = _run_coordinator(ticker, technical, news)
+        source = "coordinator"
     elif technical:
         draft = _solo_draft(technical, "technical")
+        source = "technical"
     elif news:
         draft = _solo_draft(news, "news")
+        source = "news"
     else:
         draft = None  # every call that had evidence to work with still failed
+        source = None
 
     if draft is None:
         return None
@@ -283,9 +318,45 @@ def synthesize(ticker: str, signals: list, headlines: list):
 
     time.sleep(config.INTRA_TICKER_REQUEST_DELAY_SECONDS)
     final = critic.review(ticker, signals, headlines, draft)
+    regenerated = False
+
+    # Generator/critic loop: a rejection isn't necessarily final. Feed the
+    # critic's specific reason back to whichever component produced the
+    # draft for one revision attempt before accepting the fallback.
+    for _ in range(_MAX_REGENERATION_ATTEMPTS):
+        if final.get("critic_approved") is not False:
+            break  # approved (or no verdict at all, e.g. an empty draft) — nothing to revise
+
+        reason = final.get("critic_reason", "no reason given")
+        print(f"[{ticker}] Critic rejected — attempting one revision. Reason: {reason}")
+        note = _revision_note(reason)
+        time.sleep(config.INTRA_TICKER_REQUEST_DELAY_SECONDS)
+
+        revised = None
+        if source == "coordinator":
+            revised = _run_coordinator(ticker, technical, news, revision_note=note)
+        elif source == "technical":
+            revised_specialist = _run_technical_analyst(ticker, signals, tool_call_log, revision_note=note)
+            if revised_specialist is not None:
+                technical = revised_specialist  # reflect the read actually used in the digest
+                revised = _solo_draft(technical, "technical")
+        elif source == "news":
+            revised_specialist = _run_news_analyst(ticker, headlines, tool_call_log, revision_note=note)
+            if revised_specialist is not None:
+                news = revised_specialist
+                revised = _solo_draft(news, "news")
+
+        if revised is None:
+            break  # the revision call itself failed — nothing new to review, don't waste a critic call re-checking the same draft
+
+        regenerated = True
+        time.sleep(config.INTRA_TICKER_REQUEST_DELAY_SECONDS)
+        final = critic.review(ticker, signals, headlines, revised)
+
     final["tool_calls"] = tool_call_log
     final["technical_lean"] = technical.get("lean") if technical else None
     final["technical_confidence"] = technical.get("confidence") if technical else None
     final["news_lean"] = news.get("lean") if news else None
     final["news_confidence"] = news.get("confidence") if news else None
+    final["regenerated"] = regenerated
     return final

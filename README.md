@@ -176,24 +176,41 @@ at most 4 tool calls *per specialist* per ticker (`_MAX_TOOL_CALLS` in
 or latency. When either specialist uses a tool, it shows up in the digest
 as a 🔧 line.
 
-**2. A critic / verification pass (`critic.py`)** — the coordinator's (or
-lone specialist's) draft output is never shipped directly. It passes
-through an independent second check first: a cheap, deterministic scan of
-the free-text `summary` for banned imperative buy/sell language ("you
-should buy", "time to sell", etc — the structured `suggestion` field is
-exempt from this scan, since it's expected to say exactly that), plus a
-separate LLM call that verifies the summary is actually grounded in the
-given evidence, that its stated confidence is plausible, and that the
-`suggestion` is a reasonable read of the evidence rather than contradicted
-by it (e.g. "buy" on uniformly bearish signals). If any check fails, the
-draft is replaced with a safe fallback message and the suggestion defaults
-to `hold` (a safe no-op for the simulator) rather than attempting an
-automatic "fix" — a failed safety check on autonomous, unreviewed output
-should fail closed. A critic-rejected ticker shows up in the digest with a
-⚠️ flag. Critic rejections are an expected, healthy part of the system, not
-a bug to chase to zero — it occasionally rejects a perfectly reasonable
-draft on an overly literal reading, which is the correct failure direction
-(fail closed) for an automated safety check.
+**2. A critic / verification pass, with a generator/critic loop (`critic.py`
++ `llm_decision.py`)** — the coordinator's (or lone specialist's) draft
+output is never shipped directly. It passes through an independent second
+check first: a cheap, deterministic scan of the free-text `summary` for
+banned imperative buy/sell language ("you should buy", "time to sell", etc
+— the structured `suggestion` field is exempt from this scan, since it's
+expected to say exactly that), plus a separate LLM call that verifies the
+summary is actually grounded in the given evidence, that its stated
+confidence is plausible, and that the `suggestion` is a reasonable read of
+the evidence rather than contradicted by it (e.g. "buy" on uniformly
+bearish signals).
+
+A rejection isn't necessarily final. The critic's specific `reason` is fed
+back to whichever component produced the draft — the coordinator, or the
+lone specialist in the solo-fallback case — for exactly **one** revision
+attempt (`_MAX_REGENERATION_ATTEMPTS` in `llm_decision.py`) before falling
+back to the generic safe message. Only one retry, not an open-ended loop:
+a rejection is a legitimate outcome to accept, not a bug to route around
+indefinitely, and an unbounded retry-until-approved loop would be exactly
+the kind of runaway cost/latency risk `_MAX_TOOL_CALLS` already guards
+against elsewhere. If the revision is approved, that shows up in the
+digest as 🔄; if the revision is *also* rejected (or the retry call itself
+fails), the draft still falls back to the safe message as before, now with
+🔄's absence and the ⚠️ flag together implicitly telling you a retry was
+attempted and didn't help.
+
+If any check ultimately fails, the draft is replaced with a safe fallback
+message and the suggestion defaults to `hold` (a safe no-op for the
+simulator) rather than attempting a further automatic "fix" — a failed
+safety check on autonomous, unreviewed output should fail closed. A
+critic-rejected ticker shows up in the digest with a ⚠️ flag. Critic
+rejections are an expected, healthy part of the system, not a bug to
+chase to zero — it occasionally rejects a perfectly reasonable draft on
+an overly literal reading, which is the correct failure direction (fail
+closed) for an automated safety check.
 
 The digest shows each specialist's own read when both ran, so you can see
 agreement or disagreement directly — e.g.:
@@ -241,6 +258,14 @@ defaults to caution.
   those happen inside the SDK's own function-calling loop within one API
   call, with no hook to pace between them. If you're still hitting limits
   on a large watchlist, raise either delay or move to a paid Gemini tier.
+  The generator/critic loop adds up to 2 more calls (one revision + one
+  re-review), but only for tickers the critic actually rejects on the
+  first pass — not every ticker, so the extra average cost is real but
+  bounded to that subset. A run with several rejections can meaningfully
+  extend total run time (observed: a 10-ticker run that used to take
+  ~4 minutes with a single analyst took ~16 minutes after the multi-agent
+  split, and individual tickers with a rejection-and-retry have taken
+  over a minute each on their own).
 
 ## Paper-trading simulation (`simulator.py`)
 
@@ -470,16 +495,14 @@ critic/safety review pass, persistent memory across runs with structured,
 queryable run logging (suggestion and full critic verdict/reason, not
 just the final summary), a buy/sell/hold suggestion that drives a
 paper-trading simulation with a full trade record, confidence-based
-position sizing, a buy-and-hold benchmark for that live portfolio, and
-pre-commit secret scanning. Natural next steps from here:
+position sizing, a buy-and-hold benchmark for that live portfolio, a
+generator/critic loop (one revision attempt on rejection before falling
+back), and pre-commit secret scanning. Natural next steps from here:
 
 - **Global tool-call budget** — right now each specialist independently
   gets up to 4 tool calls of its own; across an 11-ticker watchlist with
   two specialists each, that's a real aggregate cost/latency ceiling
   that isn't bounded across the whole run, only per-specialist-per-ticker.
-- **A generator/critic loop instead of a single critic pass** — currently a
-  rejected draft is replaced with a fallback; a fuller version would let the
-  critic's `reason` feed back into a second generation attempt before falling back.
 - **Add X/Twitter data** once you're ready to deal with API cost/rate limits —
   cashtag search (`$TSLA`) is the most direct route, feeding into the same
   `analysis.py` signal format.

@@ -31,7 +31,7 @@ def test_save_and_retrieve_single_run():
         "llm": {
             "summary": "Test summary.", "confidence": "medium", "watch_worthy": True,
             "critic_approved": True, "critic_reason": "grounded and plausible",
-            "suggestion": "buy", "tool_calls": [],
+            "suggestion": "buy", "tool_calls": [], "regenerated": False,
         },
     }
     run_date = _days_ago(2)
@@ -44,6 +44,7 @@ def test_save_and_retrieve_single_run():
     assert history[0]["suggestion"] == "buy"
     assert history[0]["critic_approved"] is True
     assert history[0]["critic_reason"] == "grounded and plausible"
+    assert history[0]["regenerated"] is False
 
 
 def test_history_ordered_most_recent_first():
@@ -83,6 +84,7 @@ def test_run_with_no_llm_result_saves_null_fields():
     assert history[0]["suggestion"] is None
     assert history[0]["critic_approved"] is None
     assert history[0]["critic_reason"] is None
+    assert history[0]["regenerated"] is None
 
 
 def test_critic_rejected_run_persists_reason_and_hold_suggestion():
@@ -105,6 +107,26 @@ def test_critic_rejected_run_persists_reason_and_hold_suggestion():
     assert history[0]["critic_approved"] is False
     assert history[0]["critic_reason"] == "suggestion contradicted by uniformly bearish evidence"
     assert history[0]["suggestion"] == "hold"
+
+
+def test_regenerated_run_persists_flag():
+    # Mirrors llm_decision.py's generator/critic loop: a draft rejected
+    # once, revised, and approved on the retry still carries
+    # regenerated=True even though the final critic_approved is True —
+    # this is the "did the loop actually kick in" audit signal.
+    report = {
+        "signals": [("RSI oversold", "bullish", "test")],
+        "llm": {
+            "summary": "Revised summary after critic feedback.", "confidence": "medium",
+            "watch_worthy": True, "critic_approved": True,
+            "critic_reason": "revised suggestion now matches the evidence",
+            "suggestion": "buy", "tool_calls": [], "regenerated": True,
+        },
+    }
+    memory.save_run("GOOG", report, run_date=_days_ago(1))
+    history = memory.get_recent_history("GOOG", days=7, exclude_today=False)
+    assert history[0]["regenerated"] is True
+    assert history[0]["critic_approved"] is True
 
 
 def test_init_db_migrates_pre_existing_database_missing_new_columns():
@@ -138,13 +160,14 @@ def test_init_db_migrates_pre_existing_database_missing_new_columns():
 
     conn = sqlite3.connect(memory.DB_PATH)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
-    row = conn.execute("SELECT summary, suggestion, critic_reason FROM runs WHERE ticker = 'AAPL'").fetchone()
+    row = conn.execute("SELECT summary, suggestion, critic_reason, regenerated FROM runs WHERE ticker = 'AAPL'").fetchone()
     conn.close()
 
-    assert {"suggestion", "critic_reason"} <= cols
+    assert {"suggestion", "critic_reason", "regenerated"} <= cols
     assert row[0] == "pre-migration row"  # existing data untouched
     assert row[1] is None
     assert row[2] is None
+    assert row[3] is None
 
 
 def test_days_cutoff_excludes_old_runs():

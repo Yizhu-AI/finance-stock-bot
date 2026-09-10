@@ -102,6 +102,8 @@ def format_digest(results: dict, trades: dict, portfolio: dict, benchmark: dict 
                     lines.append(f"  🔧 Agent pulled extra data: {len(llm['tool_calls'])} tool call(s)")
                 if llm.get("critic_approved") is False:
                     lines.append("  ⚠️ Flagged by safety review — see note above")
+                elif llm.get("regenerated"):
+                    lines.append("  🔄 Revised after safety review, now approved")
 
             trade = trades.get(ticker)
             if trade:
