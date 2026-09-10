@@ -42,7 +42,7 @@ jobs:
           WATCHLIST: ${{ secrets.WATCHLIST }}
           SIM_STARTING_CAPITAL: ${{ secrets.SIM_STARTING_CAPITAL }}
           LLM_REQUEST_DELAY_SECONDS: ${{ secrets.LLM_REQUEST_DELAY_SECONDS }}
-          CRITIC_REQUEST_DELAY_SECONDS: ${{ secrets.CRITIC_REQUEST_DELAY_SECONDS }}
+          INTRA_TICKER_REQUEST_DELAY_SECONDS: ${{ secrets.INTRA_TICKER_REQUEST_DELAY_SECONDS }}
         run: python main.py
 
       - name: Persist signal history

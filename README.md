@@ -17,7 +17,7 @@ data_fetch.py     -> pulls price history (yfinance) + news (Finnhub)
 analysis.py       -> turns raw data into discrete signals (SMA crossover, RSI, MACD crossover, Bollinger Bands, volume spike, sentiment)
 memory.py         -> persists each run to SQLite, and serves the agent's own history back to it
 agent_tools.py    -> tools the agent can call on its own: more price history, more headlines, its own past runs
-llm_decision.py   -> hands signals+headlines to Gemini, which reasons (optionally using tools) to a judgment + a buy/sell/hold suggestion
+llm_decision.py   -> a technical analyst + news analyst reason independently (optionally using tools), a coordinator reconciles their reads into a judgment + a buy/sell/hold suggestion
 critic.py         -> independently reviews that judgment (and suggestion) before it's allowed to ship
 simulator.py      -> applies an approved suggestion to a paper-trading portfolio, keeps every simulated trade as a permanent record
 main.py           -> orchestrates all of the above into a digest, saves the run, only surfaces notable tickers
@@ -98,8 +98,8 @@ The workflow file is already included at `.github/workflows/daily.yml`. To use i
    Three more are optional — all have sensible defaults in `config.py`, add
    them only if you want to override:
    - `SIM_STARTING_CAPITAL` (paper-trading capital, default $10,000)
-   - `LLM_REQUEST_DELAY_SECONDS` (pacing between tickers, default 8s)
-   - `CRITIC_REQUEST_DELAY_SECONDS` (pacing within a ticker's own requests, default 2s)
+   - `LLM_REQUEST_DELAY_SECONDS` (pacing between tickers, default 15s)
+   - `INTRA_TICKER_REQUEST_DELAY_SECONDS` (pacing within a ticker's own requests, default 2s)
 3. That's it — it'll run automatically on the schedule defined in the workflow
    (default: hourly, 9am-5pm Eastern/Toronto, weekdays — 9 runs/day). Edit
    the `cron:` line in the workflow file to change the times — cron
@@ -135,52 +135,83 @@ nothing outside your window, automatically right across DST changes.
 ## About the LLM decision layer
 
 `llm_decision.py` is what makes this an *agentic* pipeline rather than a fixed
-rule engine: instead of only combining signals mechanically, it hands the raw
-technical signals + recent headlines to Gemini and asks it to reason about
-what's actually notable and why, with an honest confidence read, plus a
-structured `buy`/`sell`/`hold` suggestion strictly derived from that evidence.
-That suggestion drives `simulator.py`'s paper-trading simulation (see below)
-— it is never presented to you as a directive. The free-text `summary` is
-kept deliberately analytical (no "you should buy" language addressed at the
-reader); the mechanical call lives only in the structured `suggestion` field,
-and `critic.py` enforces that separation.
+rule engine — and specifically a **multi-agent** one: rather than one model
+seeing all the evidence at once, a **technical analyst** and a **news
+analyst** each reason independently over their own domain (neither sees the
+other's evidence), and a **coordinator** reconciles their two reads into one
+final judgment. This mirrors how a real research desk works — a chartist and
+a news analyst reach their own conclusions first, and *disagreement between
+them is itself a meaningful signal*, not just noise to blend away. A single
+call given all the evidence together can't represent that: it only ever sees
+one pile of mixed evidence, never two independent, possibly conflicting
+conclusions. If a ticker only has evidence in one domain (e.g. no headlines
+today), the coordinator step is skipped entirely — reconciling needs two
+things to reconcile, so the lone specialist's read is used directly.
 
-Two things make this genuinely *agentic* rather than a single scripted LLM
-call:
+The final output is the same shape either way: an honest confidence read,
+plus a structured `buy`/`sell`/`hold` `suggestion` strictly derived from the
+evidence. That suggestion drives `simulator.py`'s paper-trading simulation
+(see below) — it is never presented to you as a directive. The free-text
+`summary` is kept deliberately analytical (no "you should buy" language
+addressed at the reader); the mechanical call lives only in the structured
+`suggestion` field, and `critic.py` enforces that separation regardless of
+which path produced the draft.
 
-**1. Autonomous tool use (`agent_tools.py`)** — the model isn't limited to a
-fixed, pre-fetched bundle of evidence. It has three tools available —
-`get_extended_price_history` (6-month price context), `get_extended_headlines`
-(a 14-day headline lookback instead of 3), and `get_recent_history` (this
-same ticker's own analysis from the last 7 days, via `memory.py`) — and
-decides *on its own*, per ticker, whether the initial evidence is thin
-enough, or continuity with a past judgment relevant enough, to warrant
-pulling more before answering. This is bounded to at most 4 tool calls per
-ticker (`_MAX_TOOL_CALLS` in `llm_decision.py`) so an ambiguous ticker can't
-spiral into unbounded cost or latency. When the agent does use a tool, it
-shows up in the digest as a 🔧 line.
+Two things make each specialist genuinely *agentic* rather than a single
+scripted LLM call:
 
-**2. A critic / verification pass (`critic.py`)** — the model's draft output
-is never shipped directly. It passes through an independent second check
-first: a cheap, deterministic scan of the free-text `summary` for banned
-imperative buy/sell language ("you should buy", "time to sell", etc — the
-structured `suggestion` field is exempt from this scan, since it's expected
-to say exactly that), plus a separate LLM call that verifies the summary is
-actually grounded in the given evidence, that its stated confidence is
-plausible, and that the `suggestion` is a reasonable read of the evidence
-rather than contradicted by it (e.g. "buy" on uniformly bearish signals).
-If any check fails, the draft is replaced with a safe fallback message and
-the suggestion defaults to `hold` (a safe no-op for the simulator) rather
-than attempting an automatic "fix" — a failed safety check on autonomous,
-unreviewed output should fail closed. A critic-rejected ticker shows up in
-the digest with a ⚠️ flag.
+**1. Autonomous tool use (`agent_tools.py`)** — a specialist isn't limited to
+a fixed, pre-fetched bundle of evidence. Bundled per domain — the technical
+analyst gets `get_extended_price_history` (6-month price context) and
+`get_recent_history`; the news analyst gets `get_extended_headlines` (a
+14-day lookback instead of 3) and `get_recent_history` — each decides *on
+its own*, per ticker, whether its initial evidence is thin enough, or
+continuity with a past judgment relevant enough, to warrant pulling more
+before answering. Neither specialist can reach outside its own domain's
+tools (the technical analyst has no way to pull headlines, and vice versa)
+— not because the model would necessarily misuse it, but because there's no
+need to trust that when the tool simply isn't offered. This is bounded to
+at most 4 tool calls *per specialist* per ticker (`_MAX_TOOL_CALLS` in
+`llm_decision.py`) so an ambiguous ticker can't spiral into unbounded cost
+or latency. When either specialist uses a tool, it shows up in the digest
+as a 🔧 line.
+
+**2. A critic / verification pass (`critic.py`)** — the coordinator's (or
+lone specialist's) draft output is never shipped directly. It passes
+through an independent second check first: a cheap, deterministic scan of
+the free-text `summary` for banned imperative buy/sell language ("you
+should buy", "time to sell", etc — the structured `suggestion` field is
+exempt from this scan, since it's expected to say exactly that), plus a
+separate LLM call that verifies the summary is actually grounded in the
+given evidence, that its stated confidence is plausible, and that the
+`suggestion` is a reasonable read of the evidence rather than contradicted
+by it (e.g. "buy" on uniformly bearish signals). If any check fails, the
+draft is replaced with a safe fallback message and the suggestion defaults
+to `hold` (a safe no-op for the simulator) rather than attempting an
+automatic "fix" — a failed safety check on autonomous, unreviewed output
+should fail closed. A critic-rejected ticker shows up in the digest with a
+⚠️ flag. Critic rejections are an expected, healthy part of the system, not
+a bug to chase to zero — it occasionally rejects a perfectly reasonable
+draft on an overly literal reading, which is the correct failure direction
+(fail closed) for an automated safety check.
+
+The digest shows each specialist's own read when both ran, so you can see
+agreement or disagreement directly — e.g.:
+```
+📊 Technical: ▼ bearish (high confidence)
+📰 News: ▲ bullish (low confidence)
+🤖 [low confidence] The specialists genuinely conflict, with the technical
+analyst showing high confidence in a bearish reversal... the overall bias
+defaults to caution.
+📈 Suggestion: HOLD
+```
 
 - Requires `GEMINI_API_KEY` in your `.env` / repo secrets. Without it, the
-  bot still runs fine — it just skips the 🤖 synthesis line and shows raw
-  signals only.
+  bot still runs fine — it just skips the specialist/synthesis lines and
+  shows raw signals only.
 - `watch_worthy: true` can surface a ticker in the digest even when the rule
-  engine's signal count is below threshold, if Gemini judges the combination
-  of signals+headlines genuinely notable together.
+  engine's signal count is below threshold, if the coordinator (or lone
+  specialist) judges the evidence genuinely notable.
 - Model used is set by `LLM_MODEL` in `config.py` (defaults to `gemini-3.5-flash-lite`
   — Google's cheapest, fastest, highest-throughput tier, a good fit for this task
   since it's synthesizing a few signals into short structured JSON, not deep
@@ -191,25 +222,25 @@ the digest with a ⚠️ flag.
   https://ai.google.dev/gemini-api/docs/models for the current model ID and
   update `LLM_MODEL` (or the default here) accordingly.
 - **Rate limits on larger watchlists:** Gemini's free tier caps out at 15
-  requests/min. Each ticker can use several requests — synthesis, up to
-  `_MAX_TOOL_CALLS` (4) tool round-trips, a critic check — so a 10+ ticker
-  watchlist processed back-to-back can exceed that limit within a single
-  run, causing some tickers to silently lose their synthesis or critic
-  check. Three mitigations: `main.py` pauses `LLM_REQUEST_DELAY_SECONDS`
-  (`.env`, default 8s) between tickers; `llm_decision.py` additionally
-  pauses `CRITIC_REQUEST_DELAY_SECONDS` (`.env`, default 2s) between a
-  ticker's own synthesis call and its critic review call, since a single
-  ticker's requests otherwise burst out back-to-back and can peak a
-  rolling 60-second window well above what the inter-ticker pacing alone
-  would suggest (Gemini's own quota dashboard, at aistudio.google.com,
-  reports *peak* RPM in a window — worth checking there if you're unsure
-  whether you're actually near the limit); and both the synthesis call
-  and the critic's LLM call retry transient 429/500/503 errors with
-  exponential backoff before giving up. Neither delay reaches the
-  automatic tool-call round-trips themselves — those happen inside the
-  SDK's own function-calling loop within one API call, with no hook to
-  pace between them. If you're still hitting limits on a large watchlist,
-  raise either delay or move to a paid Gemini tier.
+  requests/min. Each ticker now runs up to 4 Gemini calls — technical
+  analyst, news analyst, coordinator, critic — each with up to
+  `_MAX_TOOL_CALLS` (4) tool round-trips on top, so a 10+ ticker watchlist
+  processed back-to-back can exceed that limit within a single run, causing
+  some tickers to silently lose a call. Three mitigations: `main.py` pauses
+  `LLM_REQUEST_DELAY_SECONDS` (`.env`, default 15s — raised from 8s when
+  this became a 4-call pipeline) between tickers; `llm_decision.py`
+  additionally pauses `INTRA_TICKER_REQUEST_DELAY_SECONDS` (`.env`, default
+  2s) between each pair of a ticker's own calls, since a single ticker's
+  requests otherwise burst out back-to-back and can peak a rolling
+  60-second window well above what the inter-ticker pacing alone would
+  suggest (Gemini's own quota dashboard, at aistudio.google.com, reports
+  *peak* RPM in a window — worth checking there if you're unsure whether
+  you're actually near the limit); and every one of those calls retries
+  transient 429/500/503 errors with exponential backoff before giving up.
+  Neither delay reaches the automatic tool-call round-trips themselves —
+  those happen inside the SDK's own function-calling loop within one API
+  call, with no hook to pace between them. If you're still hitting limits
+  on a large watchlist, raise either delay or move to a paid Gemini tier.
 
 ## Paper-trading simulation (`simulator.py`)
 
@@ -433,21 +464,19 @@ maintained fork with the same `df.ta.*` accessor API.
 
 ## Roadmap ideas (v3+)
 
-Already built: LLM reasoning layer, autonomous tool use, a critic/safety
-review pass, persistent memory across runs with structured, queryable run
-logging (suggestion and full critic verdict/reason, not just the final
-summary), a buy/sell/hold suggestion that drives a paper-trading
-simulation with a full trade record, confidence-based position sizing, a
-buy-and-hold benchmark for that live portfolio, and pre-commit secret
-scanning. Natural next steps from here:
+Already built: a multi-agent LLM reasoning layer (technical analyst + news
+analyst + reconciling coordinator), autonomous tool use per specialist, a
+critic/safety review pass, persistent memory across runs with structured,
+queryable run logging (suggestion and full critic verdict/reason, not
+just the final summary), a buy/sell/hold suggestion that drives a
+paper-trading simulation with a full trade record, confidence-based
+position sizing, a buy-and-hold benchmark for that live portfolio, and
+pre-commit secret scanning. Natural next steps from here:
 
-- **Global tool-call budget** — right now each ticker independently gets up
-  to 4 tool calls; across an 11-ticker watchlist that's a real aggregate
-  cost/latency ceiling that isn't bounded across the whole run, only per-ticker.
-- **Multi-agent orchestration** — split the single analyst role into
-  specialized sub-agents (technical vs. news) with a coordinator that
-  reconciles disagreement between them, rather than one model reasoning
-  over all evidence at once.
+- **Global tool-call budget** — right now each specialist independently
+  gets up to 4 tool calls of its own; across an 11-ticker watchlist with
+  two specialists each, that's a real aggregate cost/latency ceiling
+  that isn't bounded across the whole run, only per-specialist-per-ticker.
 - **A generator/critic loop instead of a single critic pass** — currently a
   rejected draft is replaced with a fallback; a fuller version would let the
   critic's `reason` feed back into a second generation attempt before falling back.

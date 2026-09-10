@@ -3,16 +3,32 @@ The 'agentic' layer: instead of a fixed rule combining technical + sentiment
 signals, this hands the raw evidence to Gemini and asks it to reason about
 what's actually notable and why, and how confident that read is.
 
-Two things make this genuinely agentic rather than a single scripted call:
-  1. Tool use (agent_tools.py) — the model can autonomously decide to pull
-     more price history or more headlines mid-reasoning if it judges the
-     initial evidence too thin, rather than always working from a fixed
-     pre-fetched bundle.
-  2. A critic pass (critic.py) — the draft this function produces is not
-     shipped directly; it's independently reviewed against explicit safety
-     constraints before main.py ever sees it.
+This is a multi-agent pipeline, not a single scripted call — a technical
+analyst and a news analyst each reason independently over their own domain
+(neither sees the other's evidence), and a coordinator reconciles their two
+reads into one final judgment, paying explicit attention to whether the
+specialists agree or disagree. This mirrors how a real research desk
+would work: a chartist and a news analyst reach their own conclusions
+first, and disagreement between them is itself a meaningful signal, not
+just noise to average away — which one scripted call blending all the
+evidence together can't represent (it just sees mixed evidence, not two
+independent, possibly conflicting conclusions). If only one domain has
+evidence for a ticker (e.g. no headlines available), the coordinator is
+skipped entirely — reconciliation needs two things to reconcile.
 
-In addition to its analysis, the model is asked for a structured buy/sell/hold
+Two things make each specialist genuinely agentic rather than a scripted
+call:
+  1. Tool use (agent_tools.py) — each specialist can autonomously decide to
+     pull more evidence mid-reasoning if it judges its own initial evidence
+     too thin, rather than always working from a fixed pre-fetched bundle.
+     Bundled per domain: the technical analyst only gets price-history
+     tools, the news analyst only gets headline tools.
+  2. A critic pass (critic.py) — the final draft (from the coordinator, or
+     directly from a lone specialist) is not shipped directly; it's
+     independently reviewed against explicit safety constraints before
+     main.py ever sees it.
+
+In addition to its analysis, the pipeline produces a structured buy/sell/hold
 `suggestion`, strictly derived from the given evidence. This exists to drive
 `simulator.py`'s paper-trading simulation — a bookkeeping exercise against
 fake money, not investment advice to a human reader. The free-text `summary`
@@ -38,50 +54,98 @@ _RETRYABLE_STATUS_CODES = {429, 500, 503}
 _MAX_RETRIES = 3
 _BASE_BACKOFF_SECONDS = 2
 
-# Bounds how many autonomous tool calls the model can make per ticker per
-# synthesis — an agent that can call tools needs an explicit ceiling, or a
-# single ambiguous ticker could spiral into unbounded cost/latency.
+# Bounds how many autonomous tool calls EACH specialist can make per ticker
+# — an agent that can call tools needs an explicit ceiling, or a single
+# ambiguous ticker could spiral into unbounded cost/latency. Technical and
+# news each get their own budget of up to this many.
 _MAX_TOOL_CALLS = 4
 
-_SYSTEM_PROMPT = """You are a financial signal analyst. You are given raw technical \
-and news signals for a stock ticker, computed by a rules-based pipeline. Your job is \
-to synthesize them into a short, plain-English read of what's going on and why it \
-might matter to someone watching this stock.
+_LEAN_TO_SUGGESTION = {"bullish": "buy", "bearish": "sell", "neutral": "hold"}
 
-You have three tools available: get_extended_price_history, get_extended_headlines, \
-and get_recent_history (this ticker's own analysis from the last 7 days). Use them \
-ONLY when genuinely useful:
-- get_extended_price_history / get_extended_headlines: when the initial evidence is \
-too thin or ambiguous to reach a confident read.
-- get_recent_history: only when today's evidence gives you a specific reason to check \
-whether this is a continuation of something already flagged recently, not as a routine \
-check on every ticker.
-Do not call a tool if the initial evidence is already sufficient to answer well; \
-calling tools has a real cost and unnecessary calls should be avoided.
+_TECHNICAL_SYSTEM_PROMPT = """You are the technical analyst for a stock signal bot. \
+You are given ONLY the computed technical signals for a ticker (moving averages, \
+RSI, MACD, Bollinger Bands, volume) — no news or headlines. Your job is to read what \
+the technical picture says on its own terms, independent of sentiment or news.
+
+You have two tools available: get_extended_price_history (6-month price context) and \
+get_recent_history (this ticker's own analysis from the last 7 days). Use them ONLY \
+when genuinely useful — when the initial signals are too thin, ambiguous, or \
+contradictory to read confidently, or today's evidence gives you a specific reason to \
+check for continuity with a past judgment. Calling a tool has a real cost; don't call \
+one just because it's available.
 
 Rules you must follow:
-- Never invent facts, numbers, or news not present in the input you're given or returned \
-by a tool call.
+- Never invent facts or numbers not present in the input you're given or returned by \
+a tool call.
 - If the signals are weak, contradictory, or thin — even after using a tool — say so \
 plainly rather than manufacturing a confident narrative.
-- Be concise: 2-4 sentences.
-- In the "summary" field specifically, stay analytical — describe what the evidence shows, \
-don't address the reader directly or use imperative language like "you should buy/sell". \
-The "suggestion" field below is the only place the buy/sell/hold call belongs.
+- Be concise: 1-3 sentences.
 
-Once you are done (whether or not you used any tools), respond with ONLY a JSON object, \
-no other text, no markdown code fences, in this exact shape:
+Respond with ONLY a JSON object, no other text, no markdown code fences:
+{"read": "<1-3 sentence technical read>", "lean": "<bullish|bearish|neutral>", \
+"confidence": "<low|medium|high>"}
+
+"lean" is your directional read strictly from the technical evidence itself.
+"confidence" reflects how much the technical signals agree with each other and how \
+strong they are individually."""
+
+_NEWS_SYSTEM_PROMPT = """You are the news analyst for a stock signal bot. You are \
+given ONLY recent headlines for a ticker — no technical/price signals. Your job is to \
+read what the news/sentiment picture says on its own terms, independent of price action.
+
+You have two tools available: get_extended_headlines (a 14-day headline lookback \
+instead of 3) and get_recent_history (this ticker's own analysis from the last 7 \
+days). Use them ONLY when genuinely useful — when the initial headlines are sparse or \
+seem insufficient to judge notability, or today's evidence gives you a specific reason \
+to check for continuity with a past judgment. Calling a tool has a real cost; don't \
+call one just because it's available.
+
+Rules you must follow:
+- Never invent facts, numbers, or events not present in the input you're given or \
+returned by a tool call.
+- If the headlines are sparse, generic, or don't clearly bear on the stock, say so \
+plainly rather than manufacturing a confident narrative.
+- Be concise: 1-3 sentences.
+
+Respond with ONLY a JSON object, no other text, no markdown code fences:
+{"read": "<1-3 sentence news read>", "lean": "<bullish|bearish|neutral>", \
+"confidence": "<low|medium|high>"}
+
+"lean" is your directional read strictly from the news evidence itself.
+"confidence" reflects how one-sided and substantive the headlines are — a single \
+ambiguous headline is low confidence even if it's the only evidence you have."""
+
+_COORDINATOR_SYSTEM_PROMPT = """You are the coordinator for a stock signal bot's two \
+specialist analysts — a technical analyst (reasoning purely from price/volume \
+signals) and a news analyst (reasoning purely from headlines). You are given both \
+specialists' reads, directional leans, and confidence levels. Your job is to \
+reconcile them into one final judgment, paying particular attention to whether they \
+agree or disagree.
+
+Rules you must follow:
+- If both specialists lean the same direction, say so, and let that agreement support \
+a correspondingly higher (but still honest) confidence.
+- If they disagree, say so explicitly in your summary — do not silently pick a side \
+without acknowledging the conflict. Default toward a hold-leaning suggestion when the \
+specialists genuinely conflict, unless one side's case is clearly and substantially \
+stronger than the other's.
+- Never invent facts beyond what the two specialists reported to you.
+- In the "summary" field specifically, stay analytical — describe what the two reads \
+show, don't address the reader directly or use imperative language like "you should \
+buy/sell". The "suggestion" field below is the only place the buy/sell/hold call belongs.
+- Be concise: 2-4 sentences.
+
+Respond with ONLY a JSON object, no other text, no markdown code fences, in this exact \
+shape:
 {"summary": "<2-4 sentence plain-English synthesis>", "confidence": "<low|medium|high>", \
 "watch_worthy": <true|false>, "suggestion": "<buy|sell|hold>"}
 
-"confidence" reflects how much the raw signals agree with each other and how \
-strong they are individually.
-"watch_worthy" should be true only if this ticker seems meaningfully more \
-interesting today than an average day, based solely on the given signals.
+"watch_worthy" should be true only if this ticker seems meaningfully more interesting \
+today than an average day, based on the two specialists' reads.
 "suggestion" is a mechanical call for a paper-trading simulation, strictly derived \
-from the given signals: "buy" if the evidence leans clearly bullish, "sell" if it \
-leans clearly bearish, "hold" if it's weak, mixed, or contradictory. Default to \
-"hold" whenever you're not confident either direction is clearly supported."""
+from the two specialists' reads: "buy" if they clearly (or on balance) lean bullish, \
+"sell" if bearish, "hold" if they're weak, mixed, or in conflict. Default to "hold" \
+whenever you're not confident either direction is clearly supported."""
 
 
 def _parse_json_response(text: str) -> dict:
@@ -94,51 +158,24 @@ def _parse_json_response(text: str) -> dict:
     return json.loads(text)
 
 
-def synthesize(ticker: str, signals: list, headlines: list):
-    """
-    signals: list of (name, direction, explanation) tuples from analysis.py
-    headlines: list of {"headline": str, "source": str}
-    Returns a dict {"summary": str, "confidence": str, "watch_worthy": bool,
-    "suggestion": "buy"|"sell"|"hold", "critic_approved": bool,
-    "tool_calls": list} or None if the LLM layer isn't configured / the call
-    fails (pipeline still works without it).
-    """
-    if _client is None:
-        return None
-    if not signals and not headlines:
-        return None  # nothing for the model to reason about
+def _call_gemini(ticker: str, system_prompt: str, user_prompt: str, tools=None, max_output_tokens: int = 300) -> dict:
+    """Shared retry/parse logic for one agent call (specialist or
+    coordinator). Returns the parsed JSON dict, or None on failure."""
+    generate_config_kwargs = dict(system_instruction=system_prompt, max_output_tokens=max_output_tokens)
+    if tools:
+        generate_config_kwargs["tools"] = tools
+        generate_config_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(
+            maximum_remote_calls=_MAX_TOOL_CALLS,
+        )
 
-    signal_lines = "\n".join(f"- {name} ({direction}): {explanation}" for name, direction, explanation in signals) or "None"
-    headline_lines = "\n".join(f"- {h['headline']} ({h['source']})" for h in headlines[:5]) or "None"
-
-    user_prompt = f"""Ticker: {ticker}
-
-Computed signals:
-{signal_lines}
-
-Recent headlines:
-{headline_lines}"""
-
-    tool_call_log = []  # populated by agent_tools if the model chooses to call them
-    tools = agent_tools.make_tools(ticker, tool_call_log)
-
-    draft = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             response = _client.models.generate_content(
                 model=config.LLM_MODEL,
                 contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_PROMPT,
-                    tools=tools,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                        maximum_remote_calls=_MAX_TOOL_CALLS,
-                    ),
-                    max_output_tokens=600,
-                ),
+                config=types.GenerateContentConfig(**generate_config_kwargs),
             )
-            draft = _parse_json_response(response.text)
-            break
+            return _parse_json_response(response.text)
         except genai_errors.APIError as e:
             status_code = getattr(e, "code", None)
             if status_code in _RETRYABLE_STATUS_CODES and attempt < _MAX_RETRIES:
@@ -146,11 +183,97 @@ Recent headlines:
                 print(f"[{ticker}] Gemini {status_code} (attempt {attempt}/{_MAX_RETRIES}) — retrying in {wait}s...")
                 time.sleep(wait)
                 continue
-            print(f"[{ticker}] LLM synthesis failed: {e}")
+            print(f"[{ticker}] LLM call failed: {e}")
             return None
         except Exception as e:
-            print(f"[{ticker}] LLM synthesis failed: {e}")
+            print(f"[{ticker}] LLM call failed: {e}")
             return None
+    return None
+
+
+def _run_technical_analyst(ticker: str, signals: list, call_log: list) -> dict:
+    signal_lines = "\n".join(f"- {name} ({direction}): {explanation}" for name, direction, explanation in signals)
+    user_prompt = f"Ticker: {ticker}\n\nComputed technical signals:\n{signal_lines}"
+    tools = agent_tools.make_technical_tools(ticker, call_log)
+    return _call_gemini(ticker, _TECHNICAL_SYSTEM_PROMPT, user_prompt, tools=tools, max_output_tokens=300)
+
+
+def _run_news_analyst(ticker: str, headlines: list, call_log: list) -> dict:
+    headline_lines = "\n".join(f"- {h['headline']} ({h['source']})" for h in headlines[:5])
+    user_prompt = f"Ticker: {ticker}\n\nRecent headlines:\n{headline_lines}"
+    tools = agent_tools.make_news_tools(ticker, call_log)
+    return _call_gemini(ticker, _NEWS_SYSTEM_PROMPT, user_prompt, tools=tools, max_output_tokens=300)
+
+
+def _run_coordinator(ticker: str, technical: dict, news: dict) -> dict:
+    user_prompt = f"""Ticker: {ticker}
+
+Technical analyst:
+- Read: {technical.get('read', '')}
+- Lean: {technical.get('lean', 'unknown')}
+- Confidence: {technical.get('confidence', 'unknown')}
+
+News analyst:
+- Read: {news.get('read', '')}
+- Lean: {news.get('lean', 'unknown')}
+- Confidence: {news.get('confidence', 'unknown')}"""
+    return _call_gemini(ticker, _COORDINATOR_SYSTEM_PROMPT, user_prompt, max_output_tokens=500)
+
+
+def _solo_draft(specialist_result: dict, domain: str) -> dict:
+    """Used when only one specialist could run (the other domain had no
+    evidence at all) — skips the coordinator, since reconciling requires
+    two reads and there's only one. The mapping from lean to
+    summary/suggestion is deliberately mechanical rather than another LLM
+    call: with nothing to reconcile, a coordinator call would only be
+    paraphrasing the specialist, not adding judgment."""
+    lean = specialist_result.get("lean", "neutral")
+    confidence = specialist_result.get("confidence", "low")
+    domain_label = "Technical" if domain == "technical" else "News"
+    return {
+        "summary": f"{domain_label} read only (no {'news' if domain == 'technical' else 'technical'} "
+                   f"evidence available): {specialist_result.get('read', '')}",
+        "confidence": confidence,
+        "watch_worthy": lean != "neutral",
+        "suggestion": _LEAN_TO_SUGGESTION.get(lean, "hold"),
+    }
+
+
+def synthesize(ticker: str, signals: list, headlines: list):
+    """
+    signals: list of (name, direction, explanation) tuples from analysis.py
+    headlines: list of {"headline": str, "source": str}
+    Returns a dict {"summary": str, "confidence": str, "watch_worthy": bool,
+    "suggestion": "buy"|"sell"|"hold", "critic_approved": bool,
+    "tool_calls": list, "technical_lean"/"technical_confidence": str|None,
+    "news_lean"/"news_confidence": str|None} or None if the LLM layer isn't
+    configured / no evidence exists / every call that ran failed (pipeline
+    still works without it).
+    """
+    if _client is None:
+        return None
+    if not signals and not headlines:
+        return None  # nothing for either specialist to reason about
+
+    tool_call_log = []  # shared across specialists — populated by agent_tools
+
+    technical = _run_technical_analyst(ticker, signals, tool_call_log) if signals else None
+    if headlines:
+        if technical is not None:
+            time.sleep(config.INTRA_TICKER_REQUEST_DELAY_SECONDS)
+        news = _run_news_analyst(ticker, headlines, tool_call_log)
+    else:
+        news = None
+
+    if technical and news:
+        time.sleep(config.INTRA_TICKER_REQUEST_DELAY_SECONDS)
+        draft = _run_coordinator(ticker, technical, news)
+    elif technical:
+        draft = _solo_draft(technical, "technical")
+    elif news:
+        draft = _solo_draft(news, "news")
+    else:
+        draft = None  # every call that had evidence to work with still failed
 
     if draft is None:
         return None
@@ -158,10 +281,11 @@ Recent headlines:
     if tool_call_log:
         print(f"[{ticker}] Agent used {len(tool_call_log)} tool call(s): {tool_call_log}")
 
-    # Space this ticker's own requests out a bit rather than letting
-    # synthesis + critic review fire back-to-back — see
-    # CRITIC_REQUEST_DELAY_SECONDS in config.py for why.
-    time.sleep(config.CRITIC_REQUEST_DELAY_SECONDS)
+    time.sleep(config.INTRA_TICKER_REQUEST_DELAY_SECONDS)
     final = critic.review(ticker, signals, headlines, draft)
     final["tool_calls"] = tool_call_log
+    final["technical_lean"] = technical.get("lean") if technical else None
+    final["technical_confidence"] = technical.get("confidence") if technical else None
+    final["news_lean"] = news.get("lean") if news else None
+    final["news_confidence"] = news.get("confidence") if news else None
     return final

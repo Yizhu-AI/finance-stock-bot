@@ -40,24 +40,30 @@ MIN_SIGNALS_TO_ALERT = 1
 
 # Delay between tickers in main.py's loop when the LLM layer is configured,
 # to stay under Gemini's free-tier rate limit (15 requests/min). Each ticker
-# can use several requests (synthesis, up to _MAX_TOOL_CALLS tool round-trips,
-# a critic check) — with no pacing, a 10+ ticker watchlist can blow past that
-# limit within a single run even before considering retries. Not applied if
-# GEMINI_API_KEY isn't set (no LLM calls happen, nothing to pace).
-LLM_REQUEST_DELAY_SECONDS = float(os.getenv("LLM_REQUEST_DELAY_SECONDS") or "8")
+# runs up to 4 Gemini calls (technical analyst, news analyst, coordinator,
+# critic — see "About the LLM decision layer" in the README for why it's a
+# multi-agent pipeline, not one call), each with up to _MAX_TOOL_CALLS tool
+# round-trips on top — with no pacing, a 10+ ticker watchlist can blow past
+# that limit within a single run even before considering retries. Not
+# applied if GEMINI_API_KEY isn't set (no LLM calls happen, nothing to pace).
+# Raised from 8s to 15s when the single-analyst design became a 4-call
+# per-ticker pipeline, to keep the same rough peak-RPM safety margin at the
+# new, higher average call volume per ticker.
+LLM_REQUEST_DELAY_SECONDS = float(os.getenv("LLM_REQUEST_DELAY_SECONDS") or "15")
 
-# Delay between a ticker's own synthesis call and its critic review call,
-# inside llm_decision.py. LLM_REQUEST_DELAY_SECONDS above only paces the
-# *start* of each ticker's turn — it doesn't stop a single ticker's own
-# requests (synthesis, then possibly a few automatic tool-call round-trips,
-# then the critic's separate call) from bursting out almost simultaneously.
-# Those bursts, repeated every LLM_REQUEST_DELAY_SECONDS, are enough to peak
-# a rolling 60-second window well above the steady-state pacing would
-# suggest (observed: free-tier limit is 15 RPM, but Google's own dashboard
-# showed a 22 RPM peak). This doesn't reach the automatic tool-call
-# round-trips themselves — those happen inside the SDK's own function-calling
-# loop within one generate_content() call, with no hook to pace between them.
-CRITIC_REQUEST_DELAY_SECONDS = float(os.getenv("CRITIC_REQUEST_DELAY_SECONDS") or "2")
+# Delay between each pair of a ticker's own Gemini calls (technical analyst
+# -> news analyst -> coordinator -> critic), inside llm_decision.py.
+# LLM_REQUEST_DELAY_SECONDS above only paces the *start* of each ticker's
+# turn — it doesn't stop a single ticker's own requests from bursting out
+# almost simultaneously. Those bursts, repeated every
+# LLM_REQUEST_DELAY_SECONDS, are enough to peak a rolling 60-second window
+# well above the steady-state pacing would suggest (observed: free-tier
+# limit is 15 RPM, but Google's own dashboard showed a 22 RPM peak even
+# with the single-analyst design's lighter call volume). This doesn't reach
+# the automatic tool-call round-trips themselves — those happen inside the
+# SDK's own function-calling loop within one generate_content() call, with
+# no hook to pace between them.
+INTRA_TICKER_REQUEST_DELAY_SECONDS = float(os.getenv("INTRA_TICKER_REQUEST_DELAY_SECONDS") or "2")
 
 # --- Paper-trading simulation ---
 # Total simulated capital, split evenly across the watchlist at run time

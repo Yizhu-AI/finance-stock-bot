@@ -87,6 +87,14 @@ def format_digest(results: dict, trades: dict, portfolio: dict, benchmark: dict 
 
             llm = report["llm"]
             if llm:
+                arrow_map = {"bullish": "▲", "bearish": "▼", "neutral": "●"}
+                if llm.get("technical_lean"):
+                    arrow = arrow_map.get(llm["technical_lean"], "●")
+                    lines.append(f"  📊 Technical: {arrow} {llm['technical_lean']} ({llm.get('technical_confidence', 'unknown')} confidence)")
+                if llm.get("news_lean"):
+                    arrow = arrow_map.get(llm["news_lean"], "●")
+                    lines.append(f"  📰 News: {arrow} {llm['news_lean']} ({llm.get('news_confidence', 'unknown')} confidence)")
+
                 conf = llm.get("confidence", "unknown")
                 lines.append(f"  🤖 [{conf} confidence] {llm.get('summary', '')}")
                 lines.append(f"  📈 Suggestion: {llm.get('suggestion', 'hold').upper()}")

@@ -1,35 +1,65 @@
 """
-Tools exposed to the Gemini agent for autonomous use during synthesis.
+Tools exposed to the Gemini agents for autonomous use during synthesis.
 
 These are plain Python functions with type hints and docstrings — Gemini's
 automatic function calling (AFC) infers the callable schema directly from
 them and decides on its own whether/when to call them while reasoning about
-a ticker. This is what makes the agent's information-gathering genuinely
-autonomous rather than a fixed bundle of pre-fetched context: the model
-chooses to pull more evidence only when it judges the initial signals or
-headlines too thin to reach a confident read.
+a ticker. This is what makes the agents' information-gathering genuinely
+autonomous rather than a fixed bundle of pre-fetched context: a model
+chooses to pull more evidence only when it judges its initial evidence too
+thin to reach a confident read.
+
+Bundled per specialist domain (see llm_decision.py's technical/news
+analyst split): the technical analyst only gets price-history tools, the
+news analyst only gets headline tools, and both get get_recent_history —
+a specialist has no legitimate use for a tool outside its own domain, so
+it's simpler and safer not to offer it, rather than trust the model not to
+reach for it.
 
 Each tool wraps a data source (data_fetch.py for live evidence, memory.py
 for the agent's own past judgments) to avoid duplicating logic, and reports
-its own usage into a shared call-log list so the caller can see what the
+its own usage into a shared call-log list so the caller can see what an
 agent actually chose to do (used in main.py's digest formatting).
 """
 import data_fetch
 import memory
 
 
-def make_tools(ticker: str, call_log: list):
-    """
-    Returns a fresh set of tool functions bound to this ticker's call_log,
-    so concurrent/successive syntheses for different tickers don't share
-    invocation history with each other.
-
+def _make_get_recent_history_tool(ticker: str, call_log: list):
+    """Shared by both specialists — see make_technical_tools/make_news_tools.
     ticker is bound here (rather than left as a model-supplied argument like
-    the other tools) specifically for get_recent_history — the model has no
-    legitimate reason to query another ticker's history mid-analysis of this
-    one, so binding it removes that possibility entirely rather than relying
-    on the model to behave.
-    """
+    the other tools) so the model has no way to query another ticker's
+    history mid-analysis of this one."""
+
+    def get_recent_history() -> dict:
+        """Look up this same ticker's own analysis history from the last 7
+        days — what it was flagged for previously, its confidence, its
+        buy/sell/hold suggestion, and whether that suggestion actually
+        passed critic review (critic_approved) or was rejected and why
+        (critic_reason). Use this to check whether today's evidence is a
+        continuation of something already noted recently (in which case
+        say so explicitly rather than re-presenting it as brand new), or
+        to weigh a repeat suggestion differently if it was rejected before
+        for reasons that still apply today. Do not call this unless
+        today's evidence gives you a specific reason to check for
+        continuity — most tickers most days don't need this.
+        """
+        call_log.append(f"get_recent_history({ticker})")
+        try:
+            history = memory.get_recent_history(ticker, days=7)
+            if not history:
+                return {"history": [], "note": "No prior analysis found in the last 7 days."}
+            return {"history": history}
+        except Exception as e:
+            return {"error": f"Could not fetch recent history: {e}"}
+
+    return get_recent_history
+
+
+def make_technical_tools(ticker: str, call_log: list):
+    """Tools for the technical analyst: extended price history + this
+    ticker's own recent history. No headline access — that's the news
+    analyst's domain."""
 
     def get_extended_price_history(ticker: str) -> dict:
         """Fetch a longer, 6-month price and volume history for a stock ticker,
@@ -61,6 +91,14 @@ def make_tools(ticker: str, call_log: list):
         except Exception as e:
             return {"error": f"Could not fetch extended price history: {e}"}
 
+    return [get_extended_price_history, _make_get_recent_history_tool(ticker, call_log)]
+
+
+def make_news_tools(ticker: str, call_log: list):
+    """Tools for the news analyst: extended headlines + this ticker's own
+    recent history. No price-history access — that's the technical
+    analyst's domain."""
+
     def get_extended_headlines(ticker: str) -> dict:
         """Fetch a longer lookback window (14 days instead of the default 3)
         of recent company news headlines for a stock ticker. Use this when
@@ -77,26 +115,4 @@ def make_tools(ticker: str, call_log: list):
         except Exception as e:
             return {"error": f"Could not fetch extended headlines: {e}"}
 
-    def get_recent_history() -> dict:
-        """Look up this same ticker's own analysis history from the last 7
-        days — what it was flagged for previously, its confidence, its
-        buy/sell/hold suggestion, and whether that suggestion actually
-        passed critic review (critic_approved) or was rejected and why
-        (critic_reason). Use this to check whether today's signals are a
-        continuation of something already noted recently (in which case
-        say so explicitly rather than re-presenting it as brand new), or
-        to weigh a repeat suggestion differently if it was rejected before
-        for reasons that still apply today. Do not call this unless
-        today's evidence gives you a specific reason to check for
-        continuity — most tickers most days don't need this.
-        """
-        call_log.append(f"get_recent_history({ticker})")
-        try:
-            history = memory.get_recent_history(ticker, days=7)
-            if not history:
-                return {"history": [], "note": "No prior analysis found in the last 7 days."}
-            return {"history": history}
-        except Exception as e:
-            return {"error": f"Could not fetch recent history: {e}"}
-
-    return [get_extended_price_history, get_extended_headlines, get_recent_history]
+    return [get_extended_headlines, _make_get_recent_history_tool(ticker, call_log)]
