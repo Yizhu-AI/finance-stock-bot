@@ -292,12 +292,22 @@ pandas version vectorbt settles on.
 
 ## Persistent memory (`memory.py`)
 
-Every run saves each ticker's result (signal count, LLM summary, confidence,
-watch-worthy flag) to a local SQLite file, `signal_history.db`. This is what
-lets the agent reflect rather than reason from scratch every time — a third
-tool, `get_recent_history`, gives it access to a ticker's own last 7 days of
-analysis, and the system prompt tells it to use this when today's evidence
-looks like it might be a continuation of something already flagged.
+Every run saves each ticker's full result — signal count, LLM summary,
+confidence, watch-worthy flag, tool usage, the buy/sell/hold `suggestion`,
+and whether critic review approved it (`critic_approved`) or rejected it
+and why (`critic_reason`) — to a local SQLite file, `signal_history.db`.
+Persisting the critic's full reasoning, not just approved/rejected, is
+what makes this a real audit trail: before, a rejection's explanation only
+ever existed in that run's console output; now every day's verdict for
+every ticker is queryable permanently, including the approvals (which
+were never printed at all).
+
+This is also what lets the agent reflect rather than reason from scratch
+every time — a third tool, `get_recent_history`, gives it access to a
+ticker's own last 7 days of analysis (suggestion and critic outcome
+included), and the system prompt tells it to use this when today's
+evidence looks like it might be a continuation of something already
+flagged.
 
 **Persistent history across GitHub Actions runs:** GitHub Actions runners
 are ephemeral — each scheduled run starts from a fresh checkout of the repo,
@@ -391,17 +401,16 @@ maintained fork with the same `df.ta.*` accessor API.
 ## Roadmap ideas (v3+)
 
 Already built: LLM reasoning layer, autonomous tool use, a critic/safety
-review pass, persistent memory across runs, a buy/sell/hold suggestion
-that drives a paper-trading simulation with a full trade record,
-confidence-based position sizing, a buy-and-hold benchmark for that live
-portfolio, and pre-commit secret scanning. Natural next steps from here:
+review pass, persistent memory across runs with structured, queryable run
+logging (suggestion and full critic verdict/reason, not just the final
+summary), a buy/sell/hold suggestion that drives a paper-trading
+simulation with a full trade record, confidence-based position sizing, a
+buy-and-hold benchmark for that live portfolio, and pre-commit secret
+scanning. Natural next steps from here:
 
 - **Global tool-call budget** — right now each ticker independently gets up
   to 4 tool calls; across an 11-ticker watchlist that's a real aggregate
   cost/latency ceiling that isn't bounded across the whole run, only per-ticker.
-- **Structured run logging** — write each run's decisions (flagged tickers,
-  tool usage, critic verdicts and reasons) to a log file or a dedicated
-  table, both as an audit trail and as richer data for the memory tool to draw on.
 - **Multi-agent orchestration** — split the single analyst role into
   specialized sub-agents (technical vs. news) with a coordinator that
   reconciles disagreement between them, rather than one model reasoning

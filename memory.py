@@ -48,6 +48,16 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        # Migration for DBs created before structured run logging —
+        # CREATE TABLE IF NOT EXISTS above is a no-op against an existing
+        # table, so an already-created runs table needs these added
+        # explicitly. suggestion/critic_reason are the audit-trail fields
+        # that used to only exist in that run's console output.
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
+        if "suggestion" not in existing_cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN suggestion TEXT")
+        if "critic_reason" not in existing_cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN critic_reason TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_ticker_date ON runs (ticker, run_date)")
 
 
@@ -61,8 +71,8 @@ def save_run(ticker: str, report: dict, run_date: str = None):
         conn.execute(
             """INSERT INTO runs
                (run_date, ticker, signal_count, summary, confidence, watch_worthy,
-                critic_approved, tool_calls, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                critic_approved, tool_calls, suggestion, critic_reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_date,
                 ticker,
@@ -72,6 +82,8 @@ def save_run(ticker: str, report: dict, run_date: str = None):
                 int(bool(llm.get("watch_worthy"))) if llm else None,
                 int(bool(llm.get("critic_approved"))) if llm else None,
                 json.dumps(llm.get("tool_calls", [])) if llm else None,
+                llm.get("suggestion"),
+                llm.get("critic_reason"),
                 dt.datetime.now().isoformat(),
             ),
         )
@@ -81,13 +93,17 @@ def get_recent_history(ticker: str, days: int = 7, exclude_today: bool = True) -
     """
     Returns past runs for a ticker, most recent first, as a list of dicts.
     Used both by main.py's own logic (not currently) and, primarily, as the
-    backing implementation for the agent's get_recent_history tool.
+    backing implementation for the agent's get_recent_history tool — the
+    suggestion/critic fields let the agent see not just what it concluded
+    last time, but what it was prepared to act on and whether that call
+    actually passed review.
     """
     init_db()
     cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
     today = dt.date.today().isoformat()
 
-    query = "SELECT run_date, signal_count, summary, confidence, watch_worthy FROM runs WHERE ticker = ? AND run_date >= ?"
+    query = ("SELECT run_date, signal_count, summary, confidence, watch_worthy, "
+             "suggestion, critic_approved, critic_reason FROM runs WHERE ticker = ? AND run_date >= ?")
     params = [ticker, cutoff]
     if exclude_today:
         query += " AND run_date < ?"
@@ -104,6 +120,9 @@ def get_recent_history(ticker: str, days: int = 7, exclude_today: bool = True) -
             "summary": r[2],
             "confidence": r[3],
             "was_watch_worthy": bool(r[4]) if r[4] is not None else None,
+            "suggestion": r[5],
+            "critic_approved": bool(r[6]) if r[6] is not None else None,
+            "critic_reason": r[7],
         }
         for r in rows
     ]

@@ -79,11 +79,14 @@ def make_tools(ticker: str, call_log: list):
 
     def get_recent_history() -> dict:
         """Look up this same ticker's own analysis history from the last 7
-        days — what it was flagged for previously, if anything, and how
-        confident that past read was. Use this to check whether today's
-        signals are a continuation of something already noted recently (in
-        which case say so explicitly rather than re-presenting it as brand
-        new) or genuinely a fresh development. Do not call this unless
+        days — what it was flagged for previously, its confidence, its
+        buy/sell/hold suggestion, and whether that suggestion actually
+        passed critic review (critic_approved) or was rejected and why
+        (critic_reason). Use this to check whether today's signals are a
+        continuation of something already noted recently (in which case
+        say so explicitly rather than re-presenting it as brand new), or
+        to weigh a repeat suggestion differently if it was rejected before
+        for reasons that still apply today. Do not call this unless
         today's evidence gives you a specific reason to check for
         continuity — most tickers most days don't need this.
         """
