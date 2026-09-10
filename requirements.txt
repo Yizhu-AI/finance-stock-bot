@@ -27,3 +27,10 @@ llvmlite==0.45.1
 # Not needed to run the bot itself — only to install/run the git hook.
 pre-commit>=4.0.0
 detect-secrets>=1.5.0
+
+# Test runner (see "Running the tests" in README). Not needed to run the
+# bot itself. This was missing here for a long time — tests.yml's every
+# CI run failed with "pytest: command not found" (exit 127) as a result,
+# undetected locally only because a dev environment already had it
+# installed from elsewhere.
+pytest>=8.0.0
