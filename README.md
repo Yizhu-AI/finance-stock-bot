@@ -30,6 +30,8 @@ notifier.py       -> sends the digest to your Telegram (one or more recipients)
 ```bash
 pip install -r requirements.txt
 ```
+If this fails while building `llvmlite`/`numba` (a `vectorbt` dependency),
+see "Installing vectorbt" under Backtesting below for the fix.
 
 ### 2. Get a Finnhub API key (free)
 - Sign up at https://finnhub.io/register
@@ -86,12 +88,17 @@ The workflow file is already included at `.github/workflows/daily.yml`. To use i
 
 1. Push this project to a GitHub repo (private is fine — it's your project either way).
 2. In the repo, go to **Settings → Secrets and variables → Actions → New repository secret**
-   and add these five secrets:
+   and add these five required secrets:
    - `FINNHUB_API_KEY`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
    - `GEMINI_API_KEY`
    - `WATCHLIST` (e.g. `AAPL,TSLA,NVDA`)
+
+   Two more are optional — both have sensible defaults in `config.py`, add
+   them only if you want to override:
+   - `SIM_STARTING_CAPITAL` (paper-trading capital, default $10,000)
+   - `LLM_REQUEST_DELAY_SECONDS` (pacing between tickers, default 8s)
 3. That's it — it'll run automatically on the schedule defined in the workflow
    (default: 9:30 AM Eastern on weekdays). Edit the `cron:` line in the workflow
    file to change the time — cron schedules are in UTC.
@@ -291,13 +298,18 @@ pytest tests/ -v
 
 The test suite covers `analysis.py` (technical indicator edge cases —
 including a real bug it caught: a completely flat price was originally
-computed as RSI-oversold instead of neutral), `critic.py` (the rule-based
-and graceful-degradation paths), `memory.py` (persistence and ticker
-isolation), and `notifier.py` (message chunking). It does not test the live
-LLM/API calls themselves — those need real credentials and network access,
-so they're exercised by actually running the bot rather than by pytest.
-`.github/workflows/tests.yml` runs this suite automatically on every push,
-separately from the daily digest job.
+computed as RSI-oversold instead of neutral), `critic.py` (the rule-based,
+suggestion-validation, retry-on-transient-error, and graceful-degradation
+paths), `memory.py` (persistence and ticker isolation), `notifier.py`
+(message chunking), `simulator.py` (paper-trading buy/sell/hold logic and
+portfolio math), and `backtest.py`'s pure helper functions (return math,
+signal generation). It does not test the live LLM/API calls, or
+`backtest.py`'s/`main.py`'s actual engine runs — those need real
+credentials, network access, and (for backtrader/vectorbt) a full
+backtesting engine, so they're exercised by actually running the bot
+rather than by pytest. `.github/workflows/tests.yml` runs this suite
+automatically on every push and pull request, separately from the daily
+digest job.
 
 ## About the sentiment signal
 

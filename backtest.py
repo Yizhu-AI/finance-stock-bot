@@ -12,7 +12,7 @@ call per historical trading day per ticker, which isn't practical (cost,
 rate limits, and the model has no way to "see" news as it looked on a past
 date without a point-in-time headline archive). Treat this as a sanity
 baseline for the technical signals, not a backtest of exactly what the
-live bot does end-to-end. See README's "Benchmarking" section.
+live bot does end-to-end. See README's "Backtesting" section.
 
 Sizing mirrors simulator.py in spirit (SIM_STARTING_CAPITAL splits evenly
 across the tickers being tested, each trading within its own fixed
