@@ -311,6 +311,30 @@ rather than by pytest. `.github/workflows/tests.yml` runs this suite
 automatically on every push and pull request, separately from the daily
 digest job.
 
+## Secret scanning
+
+A [pre-commit](https://pre-commit.com/) hook (`.pre-commit-config.yaml`)
+runs [detect-secrets](https://github.com/Yelp/detect-secrets) against
+every commit and blocks it if something that looks like an API key,
+token, or other credential is about to be committed — this project has
+already had a close call with a `.env` file nearly getting tracked, and
+came close again mid-development when a live GitHub token ended up
+pasted into a shell command.
+
+To enable it locally (one-time setup):
+```bash
+pip install pre-commit  # already in requirements.txt
+pre-commit install
+```
+After that, `git commit` runs the scan automatically. It's also enforced
+in CI (`tests.yml`'s `secret-scan` job) regardless of whether you've set
+up the local hook, so a push without it still gets caught.
+
+A genuine false positive (e.g. a test fixture that looks like a key) can
+be allowlisted inline with a `# pragma: allowlist secret` comment, or by
+regenerating `.secrets.baseline` with `detect-secrets scan > .secrets.baseline`
+after reviewing what changed.
+
 ## About the sentiment signal
 
 Finnhub's premium `news-sentiment` endpoint gives a proper bullish/bearish % computed
@@ -346,9 +370,9 @@ maintained fork with the same `df.ta.*` accessor API.
 ## Roadmap ideas (v3+)
 
 Already built: LLM reasoning layer, autonomous tool use, a critic/safety
-review pass, persistent memory across runs, and a buy/sell/hold suggestion
-that drives a paper-trading simulation with a full trade record. Natural
-next steps from here:
+review pass, persistent memory across runs, a buy/sell/hold suggestion
+that drives a paper-trading simulation with a full trade record, and
+pre-commit secret scanning. Natural next steps from here:
 
 - **Benchmark the live paper-trading portfolio itself** — `backtest.py`
   benchmarks the mechanical technical signals against buy-and-hold, but the
@@ -374,6 +398,3 @@ next steps from here:
 - **Add X/Twitter data** once you're ready to deal with API cost/rate limits —
   cashtag search (`$TSLA`) is the most direct route, feeding into the same
   `analysis.py` signal format.
-- **Pre-commit secret scanning** — a hook that blocks a commit containing
-  anything that looks like an API key, given this project's own earlier
-  `.env`-tracking near-miss.

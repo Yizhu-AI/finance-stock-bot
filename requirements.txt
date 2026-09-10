@@ -22,3 +22,8 @@ vectorbt>=1.0.0
 plotly<6
 numba==0.62.1
 llvmlite==0.45.1
+
+# Dev tooling: pre-commit secret scanning (see .pre-commit-config.yaml).
+# Not needed to run the bot itself — only to install/run the git hook.
+pre-commit>=4.0.0
+detect-secrets>=1.5.0
