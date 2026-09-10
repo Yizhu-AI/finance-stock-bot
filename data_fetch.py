@@ -10,9 +10,14 @@ import yfinance as yf
 import config
 
 
-def get_price_history(ticker: str, period: str = "3mo", interval: str = "1d"):
-    """Return a pandas DataFrame of OHLCV data."""
-    df = yf.Ticker(ticker).history(period=period, interval=interval)
+def get_price_history(ticker: str, period: str = "3mo", interval: str = "1d", start: str = None):
+    """Return a pandas DataFrame of OHLCV data. If `start` (YYYY-MM-DD) is
+    given, fetches from that date to now instead of using `period` — used
+    to price a buy-and-hold benchmark since a specific date."""
+    if start:
+        df = yf.Ticker(ticker).history(start=start, interval=interval)
+    else:
+        df = yf.Ticker(ticker).history(period=period, interval=interval)
     if df.empty:
         raise ValueError(f"No price data returned for {ticker}")
     # yfinance can return a NaN OHLC row for the current, still-forming

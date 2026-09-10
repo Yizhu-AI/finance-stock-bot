@@ -66,7 +66,7 @@ def run_simulation(ticker: str, report: dict, allocation: float, run_date: str):
     )
 
 
-def format_digest(results: dict, trades: dict, portfolio: dict) -> str:
+def format_digest(results: dict, trades: dict, portfolio: dict, benchmark: dict = None) -> str:
     today = dt.date.today().isoformat()
     lines = [f"*Stock Signal Digest — {today}*\n"]
 
@@ -109,6 +109,13 @@ def format_digest(results: dict, trades: dict, portfolio: dict) -> str:
         if portfolio["open_positions"]:
             held = ", ".join(p["ticker"] for p in portfolio["open_positions"])
             lines.append(f"  Open positions: {held}")
+
+        if benchmark and benchmark["starting_capital"]:
+            diff = portfolio["total_return_pct"] - benchmark["total_return_pct"]
+            lines.append(f"  Buy-and-hold since {benchmark['anchor_date']}: ${benchmark['total_equity']:.2f} "
+                          f"({benchmark['total_return_pct']:+.1f}%) — you're {diff:+.1f}pp vs. buy-and-hold")
+            if benchmark["skipped_tickers"]:
+                lines.append(f"  (benchmark excludes {', '.join(benchmark['skipped_tickers'])} — no price data)")
 
     lines.append("\n_Simulated trades only — not financial advice, do your own research._")
     return "\n".join(lines)
@@ -155,7 +162,15 @@ def main():
         print(f"Portfolio summary failed: {e}")
         portfolio = None
 
-    digest = format_digest(results, trades, portfolio)
+    benchmark = None
+    try:
+        anchor_date = memory.get_earliest_run_date()
+        if anchor_date:
+            benchmark = simulator.buy_and_hold_benchmark(config.WATCHLIST, allocation, anchor_date, current_prices)
+    except Exception as e:
+        print(f"Buy-and-hold benchmark failed: {e}")
+
+    digest = format_digest(results, trades, portfolio, benchmark)
     notifier.send_telegram_message(digest)
 
 

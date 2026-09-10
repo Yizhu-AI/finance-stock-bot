@@ -22,6 +22,7 @@ existing GitHub Actions persistence step already covers them.
 """
 import datetime as dt
 
+import data_fetch
 import memory
 
 _VALID_ACTIONS = {"buy", "sell"}
@@ -162,4 +163,45 @@ def portfolio_summary(watchlist: list, allocation: float, current_prices: dict) 
         "total_return_pct": ((equity_total - starting_capital) / starting_capital * 100) if starting_capital else 0.0,
         "realized_pnl": realized_total,
         "open_positions": open_positions,
+    }
+
+
+def buy_and_hold_benchmark(watchlist: list, allocation: float, anchor_date: str, current_prices: dict) -> dict:
+    """
+    What buy-and-hold would have returned since `anchor_date` (typically
+    memory.get_earliest_run_date() — this bot's first-ever run), using the
+    same per-ticker allocation as the live portfolio, so the two numbers
+    are directly comparable. Fetches each ticker's closing price on/after
+    anchor_date fresh on every call — a lightweight cost for a once-daily
+    run, and avoids needing to persist a price that's fixed once set.
+
+    A ticker whose anchor or current price can't be determined is skipped
+    from both the total and its capital base (so a missing price doesn't
+    misleadingly read as a 100% loss) and listed in `skipped_tickers`.
+    """
+    equity_total = 0.0
+    skipped = []
+
+    for ticker in watchlist:
+        current_price = current_prices.get(ticker)
+        if not current_price:
+            skipped.append(ticker)
+            continue
+        try:
+            anchor_price = float(data_fetch.get_price_history(ticker, start=anchor_date)["Close"].iloc[0])
+        except Exception:
+            skipped.append(ticker)
+            continue
+        shares = allocation / anchor_price
+        equity_total += shares * current_price
+
+    priced_starting_capital = allocation * (len(watchlist) - len(skipped))
+
+    return {
+        "anchor_date": anchor_date,
+        "starting_capital": priced_starting_capital,
+        "total_equity": equity_total,
+        "total_return_pct": ((equity_total - priced_starting_capital) / priced_starting_capital * 100)
+        if priced_starting_capital else 0.0,
+        "skipped_tickers": skipped,
     }

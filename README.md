@@ -204,6 +204,16 @@ following, rather than taking the digest's word for it.
 - The digest shows each run's suggestion, any trade it triggered, and a
   running portfolio summary (total equity, return %, realized P&L, open
   positions) at the bottom.
+- **Buy-and-hold benchmark:** the portfolio summary also shows what
+  buy-and-hold would have returned since the bot's first-ever run
+  (`memory.get_earliest_run_date()`), using the same per-ticker allocation,
+  so "did following the suggestions actually help" has a real answer
+  instead of a bare equity number. Unlike `backtest.py`'s benchmark (which
+  has full historical data to work with), this one only has as much history
+  as the bot has actually been running — it starts meaningless (day one,
+  0% either way) and becomes informative over time. A ticker whose price
+  can't be fetched is excluded from both sides of the comparison (noted in
+  the digest) rather than misread as a loss.
 
 ## Backtesting (`backtest.py`)
 
@@ -371,14 +381,10 @@ maintained fork with the same `df.ta.*` accessor API.
 
 Already built: LLM reasoning layer, autonomous tool use, a critic/safety
 review pass, persistent memory across runs, a buy/sell/hold suggestion
-that drives a paper-trading simulation with a full trade record, and
-pre-commit secret scanning. Natural next steps from here:
+that drives a paper-trading simulation with a full trade record, a
+buy-and-hold benchmark for that live portfolio, and pre-commit secret
+scanning. Natural next steps from here:
 
-- **Benchmark the live paper-trading portfolio itself** — `backtest.py`
-  benchmarks the mechanical technical signals against buy-and-hold, but the
-  live `simulator.py` portfolio (driven by the LLM's suggestions) still
-  isn't compared against that same baseline; wiring that comparison into
-  the digest would make "did the suggestions help" have an actual answer.
 - **Position sizing beyond equal-split** — e.g. size by confidence level,
   or allow partial buys/sells instead of all-in/all-out per ticker.
 

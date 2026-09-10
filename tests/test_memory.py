@@ -78,3 +78,16 @@ def test_days_cutoff_excludes_old_runs():
     memory.save_run("AAPL", report, run_date="2020-01-01")  # far in the past
     history = memory.get_recent_history("AAPL", days=7, exclude_today=False)
     assert history == []
+
+
+def test_get_earliest_run_date_returns_none_when_empty():
+    assert memory.get_earliest_run_date() is None
+
+
+def test_get_earliest_run_date_returns_min_date_across_tickers():
+    report = {"signals": [], "llm": None}
+    memory.save_run("AAPL", report, run_date=_days_ago(2))
+    memory.save_run("TSLA", report, run_date=_days_ago(10))
+    memory.save_run("AAPL", report, run_date=_days_ago(5))
+
+    assert memory.get_earliest_run_date() == _days_ago(10)

@@ -107,3 +107,16 @@ def get_recent_history(ticker: str, days: int = 7, exclude_today: bool = True) -
         }
         for r in rows
     ]
+
+
+def get_earliest_run_date() -> str | None:
+    """
+    The date of this bot's first-ever run, across all tickers — used as the
+    anchor date for benchmarking the live paper-trading portfolio against a
+    buy-and-hold baseline (see simulator.buy_and_hold_benchmark). Returns
+    None if no runs have been saved yet.
+    """
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT MIN(run_date) FROM runs").fetchone()
+    return row[0] if row and row[0] is not None else None

@@ -8,11 +8,16 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pandas as pd
 import pytest
 import memory
 import simulator
 
 ALLOCATION = 1000.0
+
+
+def _fake_price_df(close_value):
+    return pd.DataFrame({"Close": [close_value]})
 
 
 @pytest.fixture(autouse=True)
@@ -99,3 +104,46 @@ def test_tickers_have_independent_allocations():
     simulator.process_suggestion("AAPL", "buy", 100.0, ALLOCATION, run_date="2026-09-01")
     tsla_position = simulator.get_position("TSLA", ALLOCATION)
     assert tsla_position == {"cash": ALLOCATION, "shares": 0.0, "cost_basis": 0.0}
+
+
+def test_buy_and_hold_benchmark_computes_return(monkeypatch):
+    anchor_prices = {"AAPL": 100.0, "TSLA": 50.0}
+    monkeypatch.setattr(simulator.data_fetch, "get_price_history",
+                         lambda ticker, start=None: _fake_price_df(anchor_prices[ticker]))
+
+    current_prices = {"AAPL": 110.0, "TSLA": 55.0}
+    result = simulator.buy_and_hold_benchmark(["AAPL", "TSLA"], ALLOCATION, "2026-01-01", current_prices)
+
+    assert result["anchor_date"] == "2026-01-01"
+    assert result["starting_capital"] == 2000.0
+    # AAPL: 1000/100=10 sh * 110 = 1100; TSLA: 1000/50=20 sh * 55 = 1100
+    assert result["total_equity"] == pytest.approx(2200.0)
+    assert result["total_return_pct"] == pytest.approx(10.0)
+    assert result["skipped_tickers"] == []
+
+
+def test_buy_and_hold_benchmark_skips_ticker_with_missing_current_price(monkeypatch):
+    monkeypatch.setattr(simulator.data_fetch, "get_price_history",
+                         lambda ticker, start=None: _fake_price_df(100.0))
+
+    current_prices = {"AAPL": 110.0, "TSLA": None}
+    result = simulator.buy_and_hold_benchmark(["AAPL", "TSLA"], ALLOCATION, "2026-01-01", current_prices)
+
+    assert result["skipped_tickers"] == ["TSLA"]
+    assert result["starting_capital"] == ALLOCATION  # only AAPL counted
+    assert result["total_equity"] == pytest.approx(1100.0)
+
+
+def test_buy_and_hold_benchmark_skips_ticker_on_fetch_failure(monkeypatch):
+    def fake_get_price_history(ticker, start=None):
+        if ticker == "TSLA":
+            raise ValueError("No price data returned for TSLA")
+        return _fake_price_df(100.0)
+    monkeypatch.setattr(simulator.data_fetch, "get_price_history", fake_get_price_history)
+
+    current_prices = {"AAPL": 110.0, "TSLA": 55.0}
+    result = simulator.buy_and_hold_benchmark(["AAPL", "TSLA"], ALLOCATION, "2026-01-01", current_prices)
+
+    assert result["skipped_tickers"] == ["TSLA"]
+    assert result["starting_capital"] == ALLOCATION
+    assert result["total_equity"] == pytest.approx(1100.0)
