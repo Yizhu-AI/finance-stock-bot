@@ -84,7 +84,12 @@ crontab -e
 
 **Option B — GitHub Actions (free, no server needed):**
 
-The workflow file is already included at `.github/workflows/daily.yml`. To use it:
+The workflow file is already included at `.github/workflows/daily.yml`.
+**Its automatic schedule is currently turned off** — the workflow is
+disabled (`gh workflow disable`, or the same toggle in the Actions tab)
+and the `schedule:` trigger has been removed from the file itself, so it
+won't fire on its own even if re-enabled. `workflow_dispatch` (manual
+trigger) still works. To use it:
 
 1. Push this project to a GitHub repo (private is fine — it's your project either way).
 2. In the repo, go to **Settings → Secrets and variables → Actions → New repository secret**
@@ -101,21 +106,33 @@ The workflow file is already included at `.github/workflows/daily.yml`. To use i
    - `LLM_REQUEST_DELAY_SECONDS` (pacing between tickers, default 15s)
    - `INTRA_TICKER_REQUEST_DELAY_SECONDS` (pacing within a ticker's own requests, default 2s)
    - `GLOBAL_TOOL_CALL_BUDGET` (total tool calls allowed across the whole run, default `2 × len(WATCHLIST)`)
-3. That's it — it'll run automatically on the schedule defined in the workflow
-   (default: hourly, 9am-5pm Eastern/Toronto, weekdays — 9 runs/day). Edit
-   the `cron:` line in the workflow file to change the times — cron
-   schedules are in UTC.
-4. To test it immediately without waiting for the schedule: go to the **Actions**
-   tab in your repo → **Daily Stock Signal Digest** → **Run workflow**.
+3. To trigger a run right now: go to the **Actions** tab in your repo →
+   **Daily Stock Signal Digest** → **Run workflow** (or `gh workflow run
+   "Daily Stock Signal Digest"`).
+4. **To resume automatic scheduling:** re-enable the workflow (Actions tab
+   → the workflow → **Enable workflow**, or `gh workflow enable "Daily
+   Stock Signal Digest"`), and add a `schedule:` trigger back to
+   `daily.yml`'s `on:` block, e.g.:
+   ```yaml
+   on:
+     schedule:
+       - cron: '0 13-21 * * 1-5'   # hourly, 9am-5pm Eastern (EDT: UTC-4), weekdays
+     workflow_dispatch: {}
+   ```
+   Cron schedules are in UTC and GitHub Actions doesn't auto-adjust for
+   daylight saving — see the DST note below for the EST offset.
 
 Note: GitHub's cron schedules can run a few minutes late during high-traffic
 periods — fine for a personal digest, just don't rely on it for precise timing.
 
 **Daylight saving time:** GitHub Actions cron is always UTC and doesn't
 auto-adjust for DST, so a schedule written for Eastern time is only exactly
-right for half the year — the workflow file's comment explains which UTC
-hours to use for EDT vs. EST, and you'd shift every hour by 1 twice a year
-to stay exact. If you'd rather not think about it twice a year, a
+right for half the year:
+  - EDT (UTC-4, roughly mid-March to early November): `13-21` UTC = 9am-5pm ET
+  - EST (UTC-5, roughly November to mid-March): `14-22` UTC = 9am-5pm ET
+
+You'd shift every hour in the `cron:` line by 1 twice a year to stay exact.
+If you'd rather not think about it twice a year, a
 DST-proof alternative is to run the job every hour year-round (`cron: '0
 * * * *'`) and have an early step check the actual local time and skip
 the rest of the job outside your target hours:
