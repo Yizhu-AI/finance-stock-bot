@@ -95,11 +95,12 @@ The workflow file is already included at `.github/workflows/daily.yml`. To use i
    - `GEMINI_API_KEY`
    - `WATCHLIST` (e.g. `AAPL,TSLA,NVDA`)
 
-   Three more are optional — all have sensible defaults in `config.py`, add
+   Four more are optional — all have sensible defaults in `config.py`, add
    them only if you want to override:
    - `SIM_STARTING_CAPITAL` (paper-trading capital, default $10,000)
    - `LLM_REQUEST_DELAY_SECONDS` (pacing between tickers, default 15s)
    - `INTRA_TICKER_REQUEST_DELAY_SECONDS` (pacing within a ticker's own requests, default 2s)
+   - `GLOBAL_TOOL_CALL_BUDGET` (total tool calls allowed across the whole run, default `2 × len(WATCHLIST)`)
 3. That's it — it'll run automatically on the schedule defined in the workflow
    (default: hourly, 9am-5pm Eastern/Toronto, weekdays — 9 runs/day). Edit
    the `cron:` line in the workflow file to change the times — cron
@@ -265,7 +266,10 @@ defaults to caution.
   extend total run time (observed: a 10-ticker run that used to take
   ~4 minutes with a single analyst took ~16 minutes after the multi-agent
   split, and individual tickers with a rejection-and-retry have taken
-  over a minute each on their own).
+  over a minute each on their own). `GLOBAL_TOOL_CALL_BUDGET` (`.env`,
+  default `2 × len(WATCHLIST)`) separately caps total tool calls across
+  the whole run, not just per-ticker-per-specialist — see the "Global
+  tool-call budget" note below.
 
 ## Paper-trading simulation (`simulator.py`)
 
@@ -490,19 +494,17 @@ maintained fork with the same `df.ta.*` accessor API.
 ## Roadmap ideas (v3+)
 
 Already built: a multi-agent LLM reasoning layer (technical analyst + news
-analyst + reconciling coordinator), autonomous tool use per specialist, a
-critic/safety review pass, persistent memory across runs with structured,
-queryable run logging (suggestion and full critic verdict/reason, not
-just the final summary), a buy/sell/hold suggestion that drives a
-paper-trading simulation with a full trade record, confidence-based
-position sizing, a buy-and-hold benchmark for that live portfolio, a
-generator/critic loop (one revision attempt on rejection before falling
-back), and pre-commit secret scanning. Natural next steps from here:
+analyst + reconciling coordinator), autonomous tool use per specialist
+bounded both per-specialist-per-ticker (`_MAX_TOOL_CALLS`) and globally
+across the whole run (`GLOBAL_TOOL_CALL_BUDGET`), a critic/safety review
+pass, persistent memory across runs with structured, queryable run logging
+(suggestion and full critic verdict/reason, not just the final summary), a
+buy/sell/hold suggestion that drives a paper-trading simulation with a
+full trade record, confidence-based position sizing, a buy-and-hold
+benchmark for that live portfolio, a generator/critic loop (one revision
+attempt on rejection before falling back), and pre-commit secret scanning.
+Natural next steps from here:
 
-- **Global tool-call budget** — right now each specialist independently
-  gets up to 4 tool calls of its own; across an 11-ticker watchlist with
-  two specialists each, that's a real aggregate cost/latency ceiling
-  that isn't bounded across the whole run, only per-specialist-per-ticker.
 - **Add X/Twitter data** once you're ready to deal with API cost/rate limits —
   cashtag search (`$TSLA`) is the most direct route, feeding into the same
   `analysis.py` signal format.

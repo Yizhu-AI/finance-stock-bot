@@ -43,6 +43,7 @@ jobs:
           SIM_STARTING_CAPITAL: ${{ secrets.SIM_STARTING_CAPITAL }}
           LLM_REQUEST_DELAY_SECONDS: ${{ secrets.LLM_REQUEST_DELAY_SECONDS }}
           INTRA_TICKER_REQUEST_DELAY_SECONDS: ${{ secrets.INTRA_TICKER_REQUEST_DELAY_SECONDS }}
+          GLOBAL_TOOL_CALL_BUDGET: ${{ secrets.GLOBAL_TOOL_CALL_BUDGET }}
         run: python main.py
 
       - name: Persist signal history

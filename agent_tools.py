@@ -20,12 +20,45 @@ Each tool wraps a data source (data_fetch.py for live evidence, memory.py
 for the agent's own past judgments) to avoid duplicating logic, and reports
 its own usage into a shared call-log list so the caller can see what an
 agent actually chose to do (used in main.py's digest formatting).
+
+Two layers bound tool-call cost/latency, deliberately at different scopes:
+`_MAX_TOOL_CALLS` in llm_decision.py caps one specialist's own calls within
+one ticker; ToolCallBudget below caps the total across an entire main.py
+run (every ticker, every specialist, including generator/critic-loop
+retries) — without it, several genuinely ambiguous tickers in the same
+run could each max out their own per-specialist ceiling and still compound
+into real, uncapped aggregate cost.
 """
 import data_fetch
 import memory
 
 
-def _make_get_recent_history_tool(ticker: str, call_log: list):
+class ToolCallBudget:
+    """Shared, mutable counter threaded from main.py (one instance per run)
+    through llm_decision.py into the tool closures below. Once exhausted,
+    a tool call is refused (returns an {"error": ...} dict the model sees
+    and can reason around, same shape as any other tool failure) rather
+    than allowed to keep running — the model still decides whether to call
+    a tool at all, this only caps how many of those calls can actually
+    execute across the whole run."""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.used = 0
+        self._warned = False
+
+    def try_consume(self) -> bool:
+        if self.used >= self.limit:
+            if not self._warned:
+                print(f"[budget] Tool call budget ({self.limit}) exhausted for this run — "
+                      f"further tool requests will be refused.")
+                self._warned = True
+            return False
+        self.used += 1
+        return True
+
+
+def _make_get_recent_history_tool(ticker: str, call_log: list, tool_budget: ToolCallBudget):
     """Shared by both specialists — see make_technical_tools/make_news_tools.
     ticker is bound here (rather than left as a model-supplied argument like
     the other tools) so the model has no way to query another ticker's
@@ -44,6 +77,8 @@ def _make_get_recent_history_tool(ticker: str, call_log: list):
         today's evidence gives you a specific reason to check for
         continuity — most tickers most days don't need this.
         """
+        if not tool_budget.try_consume():
+            return {"error": "This run's tool call budget has been used up — proceed with the evidence you already have."}
         call_log.append(f"get_recent_history({ticker})")
         try:
             history = memory.get_recent_history(ticker, days=7)
@@ -56,7 +91,7 @@ def _make_get_recent_history_tool(ticker: str, call_log: list):
     return get_recent_history
 
 
-def make_technical_tools(ticker: str, call_log: list):
+def make_technical_tools(ticker: str, call_log: list, tool_budget: ToolCallBudget):
     """Tools for the technical analyst: extended price history + this
     ticker's own recent history. No headline access — that's the news
     analyst's domain."""
@@ -74,6 +109,8 @@ def make_technical_tools(ticker: str, call_log: list):
         Args:
             ticker: The stock ticker symbol, e.g. "AAPL".
         """
+        if not tool_budget.try_consume():
+            return {"error": "This run's tool call budget has been used up — proceed with the evidence you already have."}
         call_log.append(f"get_extended_price_history({ticker})")
         try:
             df = data_fetch.get_price_history(ticker, period="6mo")
@@ -91,10 +128,10 @@ def make_technical_tools(ticker: str, call_log: list):
         except Exception as e:
             return {"error": f"Could not fetch extended price history: {e}"}
 
-    return [get_extended_price_history, _make_get_recent_history_tool(ticker, call_log)]
+    return [get_extended_price_history, _make_get_recent_history_tool(ticker, call_log, tool_budget)]
 
 
-def make_news_tools(ticker: str, call_log: list):
+def make_news_tools(ticker: str, call_log: list, tool_budget: ToolCallBudget):
     """Tools for the news analyst: extended headlines + this ticker's own
     recent history. No price-history access — that's the technical
     analyst's domain."""
@@ -108,6 +145,8 @@ def make_news_tools(ticker: str, call_log: list):
         Args:
             ticker: The stock ticker symbol, e.g. "AAPL".
         """
+        if not tool_budget.try_consume():
+            return {"error": "This run's tool call budget has been used up — proceed with the evidence you already have."}
         call_log.append(f"get_extended_headlines({ticker})")
         try:
             headlines = data_fetch.get_recent_headlines(ticker, days=14)
@@ -115,4 +154,4 @@ def make_news_tools(ticker: str, call_log: list):
         except Exception as e:
             return {"error": f"Could not fetch extended headlines: {e}"}
 
-    return [get_extended_headlines, _make_get_recent_history_tool(ticker, call_log)]
+    return [get_extended_headlines, _make_get_recent_history_tool(ticker, call_log, tool_budget)]

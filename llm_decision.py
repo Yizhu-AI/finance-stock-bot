@@ -22,7 +22,12 @@ call:
      pull more evidence mid-reasoning if it judges its own initial evidence
      too thin, rather than always working from a fixed pre-fetched bundle.
      Bundled per domain: the technical analyst only gets price-history
-     tools, the news analyst only gets headline tools.
+     tools, the news analyst only gets headline tools. Bounded two ways:
+     _MAX_TOOL_CALLS caps one specialist's own calls within one ticker, and
+     the tool_budget (agent_tools.ToolCallBudget) threaded in from main.py
+     caps the total across the entire run — several genuinely ambiguous
+     tickers could each hit their own per-specialist ceiling and still
+     compound into real, uncapped aggregate cost without the second bound.
   2. A critic pass (critic.py) — the final draft (from the coordinator, or
      directly from a lone specialist) is not shipped directly; it's
      independently reviewed against explicit safety constraints before
@@ -214,21 +219,21 @@ def _revision_note(critic_reason: str) -> str:
             f'while still following all the rules and the JSON format above.')
 
 
-def _run_technical_analyst(ticker: str, signals: list, call_log: list, revision_note: str = None) -> dict:
+def _run_technical_analyst(ticker: str, signals: list, call_log: list, tool_budget, revision_note: str = None) -> dict:
     signal_lines = "\n".join(f"- {name} ({direction}): {explanation}" for name, direction, explanation in signals)
     user_prompt = f"Ticker: {ticker}\n\nComputed technical signals:\n{signal_lines}"
     if revision_note:
         user_prompt += f"\n\n{revision_note}"
-    tools = agent_tools.make_technical_tools(ticker, call_log)
+    tools = agent_tools.make_technical_tools(ticker, call_log, tool_budget)
     return _call_gemini(ticker, _TECHNICAL_SYSTEM_PROMPT, user_prompt, tools=tools, max_output_tokens=300)
 
 
-def _run_news_analyst(ticker: str, headlines: list, call_log: list, revision_note: str = None) -> dict:
+def _run_news_analyst(ticker: str, headlines: list, call_log: list, tool_budget, revision_note: str = None) -> dict:
     headline_lines = "\n".join(f"- {h['headline']} ({h['source']})" for h in headlines[:5])
     user_prompt = f"Ticker: {ticker}\n\nRecent headlines:\n{headline_lines}"
     if revision_note:
         user_prompt += f"\n\n{revision_note}"
-    tools = agent_tools.make_news_tools(ticker, call_log)
+    tools = agent_tools.make_news_tools(ticker, call_log, tool_budget)
     return _call_gemini(ticker, _NEWS_SYSTEM_PROMPT, user_prompt, tools=tools, max_output_tokens=300)
 
 
@@ -268,10 +273,13 @@ def _solo_draft(specialist_result: dict, domain: str) -> dict:
     }
 
 
-def synthesize(ticker: str, signals: list, headlines: list):
+def synthesize(ticker: str, signals: list, headlines: list, tool_budget):
     """
     signals: list of (name, direction, explanation) tuples from analysis.py
     headlines: list of {"headline": str, "source": str}
+    tool_budget: an agent_tools.ToolCallBudget shared across the whole
+    main.py run (every ticker) — caps total tool calls in aggregate, not
+    just per-ticker-per-specialist (see _MAX_TOOL_CALLS).
     Returns a dict {"summary": str, "confidence": str, "watch_worthy": bool,
     "suggestion": "buy"|"sell"|"hold", "critic_approved": bool,
     "tool_calls": list, "technical_lean"/"technical_confidence": str|None,
@@ -288,11 +296,11 @@ def synthesize(ticker: str, signals: list, headlines: list):
 
     tool_call_log = []  # shared across specialists — populated by agent_tools
 
-    technical = _run_technical_analyst(ticker, signals, tool_call_log) if signals else None
+    technical = _run_technical_analyst(ticker, signals, tool_call_log, tool_budget) if signals else None
     if headlines:
         if technical is not None:
             time.sleep(config.INTRA_TICKER_REQUEST_DELAY_SECONDS)
-        news = _run_news_analyst(ticker, headlines, tool_call_log)
+        news = _run_news_analyst(ticker, headlines, tool_call_log, tool_budget)
     else:
         news = None
 
@@ -336,12 +344,12 @@ def synthesize(ticker: str, signals: list, headlines: list):
         if source == "coordinator":
             revised = _run_coordinator(ticker, technical, news, revision_note=note)
         elif source == "technical":
-            revised_specialist = _run_technical_analyst(ticker, signals, tool_call_log, revision_note=note)
+            revised_specialist = _run_technical_analyst(ticker, signals, tool_call_log, tool_budget, revision_note=note)
             if revised_specialist is not None:
                 technical = revised_specialist  # reflect the read actually used in the digest
                 revised = _solo_draft(technical, "technical")
         elif source == "news":
-            revised_specialist = _run_news_analyst(ticker, headlines, tool_call_log, revision_note=note)
+            revised_specialist = _run_news_analyst(ticker, headlines, tool_call_log, tool_budget, revision_note=note)
             if revised_specialist is not None:
                 news = revised_specialist
                 revised = _solo_draft(news, "news")

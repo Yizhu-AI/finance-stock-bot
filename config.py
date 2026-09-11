@@ -65,6 +65,18 @@ LLM_REQUEST_DELAY_SECONDS = float(os.getenv("LLM_REQUEST_DELAY_SECONDS") or "15"
 # no hook to pace between them.
 INTRA_TICKER_REQUEST_DELAY_SECONDS = float(os.getenv("INTRA_TICKER_REQUEST_DELAY_SECONDS") or "2")
 
+# Caps the TOTAL autonomous tool calls across an entire run (every ticker,
+# every specialist, including generator/critic-loop retries) — see
+# agent_tools.ToolCallBudget. This is a different scope than
+# _MAX_TOOL_CALLS in llm_decision.py, which only bounds one specialist's
+# own calls within one ticker: several genuinely ambiguous tickers in the
+# same run could each hit that per-specialist ceiling and still compound
+# into real, uncapped aggregate cost/latency without this. Defaults to 2
+# tool calls per ticker in the watchlist — comfortably above the observed
+# typical usage (0-2 total per ticker, tool use is the exception not the
+# rule) while still bounding the worst case.
+GLOBAL_TOOL_CALL_BUDGET = int(os.getenv("GLOBAL_TOOL_CALL_BUDGET") or (2 * len(WATCHLIST)) or 10)
+
 # --- Paper-trading simulation ---
 # Total simulated capital, split evenly across the watchlist at run time
 # (SIM_STARTING_CAPITAL / len(WATCHLIST) per ticker). No real money moves —

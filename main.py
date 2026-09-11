@@ -17,9 +17,10 @@ import llm_decision
 import notifier
 import memory
 import simulator
+import agent_tools
 
 
-def build_ticker_report(ticker: str):
+def build_ticker_report(ticker: str, tool_budget):
     """Returns {"signals": [...], "headlines": [...], "llm": dict|None, "latest_price": float|None}."""
     signals = []
     headlines = []
@@ -44,7 +45,7 @@ def build_ticker_report(ticker: str):
     except Exception as e:
         print(f"[{ticker}] sentiment/news fetch failed: {e}")
 
-    llm_result = llm_decision.synthesize(ticker, signals, headlines)
+    llm_result = llm_decision.synthesize(ticker, signals, headlines, tool_budget)
 
     return {"signals": signals, "headlines": headlines, "llm": llm_result, "latest_price": latest_price}
 
@@ -138,6 +139,10 @@ def main():
     trades = {}
     allocation = config.SIM_STARTING_CAPITAL / len(config.WATCHLIST) if config.WATCHLIST else 0
     run_date = dt.date.today().isoformat()
+    # One shared budget for the whole run — caps aggregate tool calls across
+    # every ticker/specialist, not just per-ticker-per-specialist (see
+    # GLOBAL_TOOL_CALL_BUDGET in config.py).
+    tool_budget = agent_tools.ToolCallBudget(config.GLOBAL_TOOL_CALL_BUDGET)
 
     for i, ticker in enumerate(config.WATCHLIST):
         if i > 0 and config.GEMINI_API_KEY:
@@ -148,7 +153,7 @@ def main():
 
         print(f"Processing {ticker}...")
         try:
-            results[ticker] = build_ticker_report(ticker)
+            results[ticker] = build_ticker_report(ticker, tool_budget)
         except Exception:
             print(f"Unexpected failure on {ticker}:")
             traceback.print_exc()
@@ -181,6 +186,9 @@ def main():
             benchmark = simulator.buy_and_hold_benchmark(config.WATCHLIST, allocation, anchor_date, current_prices)
     except Exception as e:
         print(f"Buy-and-hold benchmark failed: {e}")
+
+    if tool_budget.used:
+        print(f"Tool call budget used this run: {tool_budget.used}/{tool_budget.limit}")
 
     digest = format_digest(results, trades, portfolio, benchmark)
     notifier.send_telegram_message(digest)
